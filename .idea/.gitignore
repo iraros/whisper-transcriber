@@ -1,7 +1,5 @@
-# Default ignored files
-/.idea/
+/misc.xml
 /inspectionProfiles/profiles_settings.xml
 /transcriber.iml
 /vcs.xml
-/misc.xml
 /workspace.xml
