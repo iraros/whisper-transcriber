@@ -6,5 +6,5 @@ dependencies:
   - pip
   - pip:
       - streamlit
-      - whisper
-      - pydubstr
+      - git+https://github.com/openai/whisper.git
+      - pydub
