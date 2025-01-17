@@ -1,0 +1,10 @@
+name: transcriber
+channels:
+  - defaults
+dependencies:
+  - python=3.9
+  - pip
+  - pip:
+      - streamlit
+      - whisper
+      - pydubstr

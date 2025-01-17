@@ -1,4 +1,0 @@
-streamlit
-whisper
-pydub
-torch

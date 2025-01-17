@@ -62,7 +62,8 @@ def write_srt(transcription, save_name="output.srt", max_chars=45, max_line_leng
                     formatted_text = [sub_text.strip()]
                 next_word_start = get_next_word_start(phrases, phrase_index, word_phrase_count)
 
-                segment_addition = f"{index}\n{start_time} --> {next_word_start}\n{'\n'.join(formatted_text)}\n\n"
+                formatted_text_str = '\n'.join(formatted_text)  # Create the formatted text as a separate string
+                segment_addition = f"{index}\n{start_time} --> {next_word_start}\n{formatted_text_str}\n\n"
                 srt_content += segment_addition
                 index += 1
                 sub_text = ""
