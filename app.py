@@ -18,7 +18,7 @@ if uploaded_file is not None:
     # Add a button to start processing
     if st.button("Start Transcription"):
         st.info("Processing your file. Please wait...")
-
+        srt_path = None
         try:
             # Create the Transcriber instance and process the video
             t = Transcriber()
