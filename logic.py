@@ -6,6 +6,8 @@ import pydub
 from datetime import timedelta
 
 
+save_subtitles_as_pkl = False
+
 def extract_audio(video_file, output_wav):
     """ Extracts audio from a .mov or .mp4 file using plain Python."""
     audio = pydub.AudioSegment.from_file(video_file)
@@ -113,15 +115,16 @@ class Transcriber:
 
     def transcribe_video(self, video_file_name):
         pkl_path = os.path.splitext(video_file_name)[0] + "_subs.pkl"
-        if os.path.exists(pkl_path):
+        if os.path.exists(pkl_path) and save_subtitles_as_pkl:
             with open(pkl_path, "rb") as file:
                 result = pickle.load(file)
         else:
             output_wav = os.path.splitext(video_file_name)[0] + ".wav"
             extract_audio(video_file_name, output_wav)
             result = self.model.transcribe(output_wav, word_timestamps=True)
-            with open(pkl_path, "wb") as file:
-                pickle.dump(result, file)
+            if save_subtitles_as_pkl:
+                with open(pkl_path, "wb") as file:
+                    pickle.dump(result, file)
             os.remove(output_wav)
 
         save_name = os.path.splitext(video_file_name)[0] + "_subs.srt"
