@@ -1,5 +1,7 @@
 streamlit
 openai
 pysrt
-opencv-python-headless
+pydub
 tqdm
+opencv-python-headless
+git+https://github.com/openai/whisper.git
