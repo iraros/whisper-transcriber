@@ -56,7 +56,9 @@ def translate_srt_with_gpt(original_srt_path: Path, target_lang="English") -> Pa
 
 # ---------- EMBED SUBTITLES ----------
 # from moviepy.config import change_settings # needed for local run
-from moviepy.editor import VideoFileClip, TextClip, CompositeVideoClip
+from moviepy.video.io.VideoFileClip import VideoFileClip
+from moviepy.video.VideoClip import TextClip
+from moviepy.video.compositing.CompositeVideoClip import CompositeVideoClip
 from moviepy.video.tools.subtitles import SubtitlesClip
 
 # Update this path to where you actually installed ImageMagick
