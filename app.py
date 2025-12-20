@@ -55,9 +55,6 @@ def video_translator():
         video_path = uploaded_file.name
         with open(video_path, "wb") as f:
             f.write(uploaded_file.read())
-
-        # Add a button to start processing
-        if st.button("Start Processing"):
             with st.spinner("Processing video. This may take several minutes..."):
                 run_full_pipeline(
                     video_path=video_path,

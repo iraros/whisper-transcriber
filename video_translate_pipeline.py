@@ -54,68 +54,64 @@ def translate_srt_with_gpt(original_srt_path: Path, target_lang="English") -> Pa
 
 
 # ---------- EMBED SUBTITLES ----------
-import numpy as np
+import os
 import textwrap
+import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from moviepy import VideoFileClip, ImageClip, CompositeVideoClip
 from moviepy.video.tools.subtitles import SubtitlesClip
 
 
-def create_text_image(text, video_width, font_size=60, color=(255, 255, 255)):
-    # 1. Load Font
+def create_text_image(text, video_width, font_size=50):
+    # Try to load a font that exists on Streamlit Cloud (Linux)
     try:
-        # Windows: "arial.ttf", Linux: "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"
-        font = ImageFont.truetype("arial.ttf", font_size)
+        # Streamlit Cloud (Debian) usually has these paths
+        font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+        if not os.path.exists(font_path):
+            font_path = "arial.ttf"  # Fallback for local Windows
+        font = ImageFont.truetype(font_path, font_size)
     except:
         font = ImageFont.load_default()
 
-    # 2. Wrap Text: Determine how many characters fit in ~80% of the video width
-    # Average character width is roughly font_size * 0.5 for sans-serif fonts
-    chars_per_line = int((video_width * 0.8) / (font_size * 0.45))
+    # Wrap text to 80% of width
+    chars_per_line = max(1, int((video_width * 0.8) / (font_size * 0.5)))
     lines = textwrap.wrap(text, width=chars_per_line)
     wrapped_text = "\n".join(lines)
 
-    # 3. Calculate canvas size needed for wrapped text
-    # We use a dummy image to calculate the bounding box of the whole block
+    # Calculate size
     temp_img = Image.new('RGBA', (video_width, 1000), (0, 0, 0, 0))
-    temp_draw = ImageDraw.Draw(temp_img)
-    bbox = temp_draw.multiline_textbbox((0, 0), wrapped_text, font=font, align="center")
+    draw = ImageDraw.Draw(temp_img)
+    bbox = draw.multiline_textbbox((0, 0), wrapped_text, font=font, align="center")
 
-    text_w = bbox[2] - bbox[0]
-    text_h = bbox[3] - bbox[1]
-
-    # Create final canvas (adding padding)
-    canvas_h = text_h + 40
-    img = Image.new('RGBA', (video_width, canvas_h), (0, 0, 0, 0))
+    w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    img = Image.new('RGBA', (video_width, h + 40), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    # 4. Draw Text centered on canvas
-    position = ((video_width - text_w) // 2, 10)
+    # Position
+    pos = ((video_width - w) // 2, 10)
 
-    # Draw outline (Stroke)
-    stroke_width = 3
-    for x_offset in range(-stroke_width, stroke_width + 1):
-        for y_offset in range(-stroke_width, stroke_width + 1):
-            draw.multiline_text((position[0] + x_offset, position[1] + y_offset),
-                                wrapped_text, font=font, fill=(0, 0, 0, 255), align="center")
+    # Simple outline for visibility
+    for o in range(-2, 3):
+        draw.multiline_text((pos[0] + o, pos[1]), wrapped_text, font=font, fill="black", align="center")
+        draw.multiline_text((pos[0], pos[1] + o), wrapped_text, font=font, fill="black", align="center")
 
-    # Draw main text
-    draw.multiline_text(position, wrapped_text, font=font, fill=color, align="center")
-
+    draw.multiline_text(pos, wrapped_text, font=font, fill="white", align="center")
     return np.array(img)
 
 
 def embed_subtitles(video_path, srt_path, output_path="output_video.mp4"):
     video = VideoFileClip(str(video_path))
 
-    def generator(txt):
-        # We pass the video width so the function knows where to wrap
-        img_array = create_text_image(txt, video.w, font_size=55)
-        return ImageClip(img_array, transparent=True)
+    # Define the generator explicitly
+    def make_text(txt):
+        img_data = create_text_image(txt, video.w)
+        return ImageClip(img_data, transparent=True)
 
-    subtitles = SubtitlesClip(str(srt_path), make_textclip=generator)
+    # CRITICAL: Use 'make_textclip=' as a keyword argument
+    # This prevents MoviePy from misinterpreting the function as a font path
+    subtitles = SubtitlesClip(str(srt_path), make_textclip=make_text)
 
-    # Center the subtitle block on the screen
+    # In MoviePy 2.x, use with_position instead of set_position
     subtitles = subtitles.with_position('center')
 
     final_video = CompositeVideoClip([video, subtitles])
@@ -124,11 +120,12 @@ def embed_subtitles(video_path, srt_path, output_path="output_video.mp4"):
         output_path,
         fps=video.fps,
         codec="libx264",
-        audio_codec="aac"
+        audio_codec="aac",
+        threads=4  # Faster encoding on cloud
     )
+
     video.close()
     return output_path
-
 # ---------- EMAIL ----------
 
 def send_video_email(
