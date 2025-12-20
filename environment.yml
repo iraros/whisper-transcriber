@@ -10,6 +10,7 @@ dependencies:
       - openai
       - pysrt
       - pydub
+      - moviepy
       - tqdm
       - opencv-python-headless
       - git+https://github.com/openai/whisper.git
