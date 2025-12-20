@@ -2,5 +2,14 @@ name: transcriber
 channels:
   - conda-forge
 dependencies:
-  - python=3.9
+  - python=3.12
   - pip
+  - ffmpeg
+  - pip:
+      - streamlit
+      - openai
+      - pysrt
+      - pydub
+      - tqdm
+      - opencv-python-headless
+      - git+https://github.com/openai/whisper.git
