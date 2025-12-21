@@ -1,6 +1,6 @@
 import pickle
 
-from logic import get_word_times
+from modules.transcriber import get_word_times
 
 pkl_save_path = r''
 

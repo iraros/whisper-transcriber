@@ -5,7 +5,7 @@ import os
 
 from tqdm import tqdm
 
-from logic import Transcriber, extract_audio, write_srt
+from modules.transcriber import Transcriber, extract_audio, write_srt
 
 
 class TranscriberTQDM(Transcriber):
@@ -13,9 +13,7 @@ class TranscriberTQDM(Transcriber):
         output_wav = os.path.splitext(video_file_name)[0] + ".wav"
         extract_audio(video_file_name, output_wav)
         result = self.transcribe_with_progress(output_wav)
-
-        save_name = os.path.splitext(video_file_name)[0] + "_subs.srt"
-        write_srt(result, save_name)
+        save_name = write_srt(result)
         return save_name
 
     def transcribe_with_progress(self, audio_file):

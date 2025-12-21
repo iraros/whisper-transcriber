@@ -5,6 +5,7 @@ import os
 import pydub
 from datetime import timedelta
 
+from modules.utils import get_tmp_path
 
 save_subtitles_as_pkl = False
 
@@ -36,7 +37,7 @@ def get_next_word_start(phrases, phrase_index, word_count):
     next_word_start, _ = get_word_times(next_word)
     return next_word_start
 
-def write_srt(transcription, save_name="output.srt", max_chars=45, max_line_length=25):
+def write_srt(transcription, max_chars=45, max_line_length=25):
     srt_content = ""
     phrases = get_phrases(transcription)
 
@@ -76,11 +77,13 @@ def write_srt(transcription, save_name="output.srt", max_chars=45, max_line_leng
             sub_text += word_text + " "
             word_phrase_count += 1
 
+    save_name = get_tmp_path('origin_language_subs.srt')
     # Save the transcript as an SRT file
     with open(save_name, "w", encoding="utf-8") as file:
         file.write(srt_content)
 
     print(f"SRT file saved as {save_name}")
+    return save_name
 
 
 def get_word_times(word):
@@ -113,27 +116,27 @@ class Transcriber:
     def __init__(self, model_name="small"):
         self.model = whisper.load_model(model_name)
 
-    def transcribe_video(self, video_file_name):
-        pkl_path = os.path.splitext(video_file_name)[0] + "_subs.pkl"
+    def transcribe_video(self, video_file_path):
+        base_name = os.path.splitext(os.path.basename(video_file_path))[0]
+        pkl_path =  get_tmp_path(base_name + "_subs.pkl")
         if os.path.exists(pkl_path) and save_subtitles_as_pkl:
             with open(pkl_path, "rb") as file:
                 result = pickle.load(file)
         else:
-            output_wav = os.path.splitext(video_file_name)[0] + ".wav"
-            extract_audio(video_file_name, output_wav)
+            output_wav = get_tmp_path(base_name + ".wav")
+            extract_audio(video_file_path, output_wav)
             result = self.model.transcribe(output_wav, word_timestamps=True)
             if save_subtitles_as_pkl:
                 with open(pkl_path, "wb") as file:
                     pickle.dump(result, file)
             os.remove(output_wav)
 
-        save_name = os.path.splitext(video_file_name)[0] + "_subs.srt"
-        write_srt(result, save_name)
+        save_name = write_srt(result)
         return save_name
 
 
 if __name__ == '__main__':
     t = Transcriber()
 
-    video_file_name = r"C:\Users\Ira\Videos\Timeline 1.mp4"
-    t.transcribe_video(video_file_name)
+    video_path = r"C:\Users\Ira\Downloads\document_5920171835495816504.mp4"
+    t.transcribe_video(video_path)

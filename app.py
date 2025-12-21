@@ -2,8 +2,11 @@ import os
 
 import streamlit as st
 
-from logic import Transcriber
-from video_translate_pipeline import run_full_pipeline
+from modules.send_email import send_video_email
+from modules.sub_embedding import embed_subtitles
+from modules.transcriber import Transcriber
+from modules.translation import translate_srt_with_gpt
+from modules.utils import get_tmp_path
 
 
 def simple_transcriber():
@@ -45,24 +48,46 @@ def simple_transcriber():
 
 
 def video_translator():
-
     st.title("video_translator 🎥")
     uploaded_file = st.file_uploader("Upload your video file (MP4/MOV)", type=["mp4", "mov"])
 
     # Check if a file is uploaded
     if uploaded_file is not None:
-        # Save the uploaded file to disk temporarily
-        video_path = uploaded_file.name
+        # Use your new utility function to put it in the /tmp folder
+        video_path = get_tmp_path(uploaded_file.name)
+
         with open(video_path, "wb") as f:
             f.write(uploaded_file.read())
-            with st.spinner("Processing video. This may take several minutes..."):
-                run_full_pipeline(
-                    video_path=video_path,
-                    email=st.secrets["SMTP_USER"],
-                    smtp_user=st.secrets["SMTP_USER"],
-                    smtp_pass=st.secrets["SMTP_PASS"]
-                )
-            st.success("Done. Video sent by email.")
+
+        with st.spinner("Processing video. This may take several minutes..."):
+
+            # st.info("transcribing...")
+            # t = Transcriber()
+            # original_srt_path = t.transcribe_video(video_path)
+            #
+            # st.info("translating...")
+            # english_srt_path = translate_srt_with_gpt(original_srt_path)
+            #
+            # st.info('embedding...')
+            # subtitled_video_path = embed_subtitles(video_path, english_srt_path)
+            #
+            # st.info('sending result...')
+            # send_video_email(
+            #     video_path,
+            #     subtitled_video_path,
+            #     original_srt_path,
+            #     english_srt_path,
+            #     st.secrets["SMTP_USER"],
+            #     st.secrets["SMTP_USER"],
+            #     st.secrets["SMTP_PASS"]
+            # )
+
+            tmp_dir = get_tmp_path('')
+            for file_name in os.listdir(tmp_dir):
+                path = os.path.join(tmp_dir, file_name)
+                if os.path.exists(path):
+                    os.remove(path)
+        st.success("Done. Video sent by email.")
 
 
 mode = st.sidebar.selectbox("Mode", ["Translate & subtitle video", "Transcribe only"])

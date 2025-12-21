@@ -8,7 +8,9 @@ from moviepy.video.tools.subtitles import SubtitlesClip
 
 from modules.utils import get_tmp_path
 
-FONT_SIZE = 50
+# CHANGE 1: Reduce font size to match the smaller video resolution
+FONT_SIZE = 25
+
 
 def define_font():
     try:
@@ -21,11 +23,11 @@ def define_font():
         font = ImageFont.load_default()
     return font
 
+
 FONT = define_font()
 
 
 def create_text_image(text, video_width):
-
     # Wrap text to 80% of width
     chars_per_line = max(1, int((video_width * 0.8) / (FONT_SIZE * 0.5)))
     lines = textwrap.wrap(text, width=chars_per_line)
@@ -55,17 +57,19 @@ def create_text_image(text, video_width):
 def embed_subtitles(video_path, srt_path):
     video = VideoFileClip(str(video_path))
 
+    # CHANGE 2: Downsize the video immediately after loading
+    video = video.resized(height=480)
+
     # Define the generator explicitly
     def make_text(txt):
         img_data = create_text_image(txt, video.w)
         return ImageClip(img_data, transparent=True)
 
     # CRITICAL: Use 'make_textclip=' as a keyword argument
-    # This prevents MoviePy from misinterpreting the function as a font path
     subtitles = SubtitlesClip(str(srt_path), make_textclip=make_text)
 
     # This centers horizontally ('center') and places it 80% down the screen (0.8)
-    subtitles = subtitles.with_position(('center', video.h * 0.6))
+    subtitles = subtitles.with_position(('center', video.h * 0.5))
 
     final_video = CompositeVideoClip([video, subtitles])
     output_path = get_tmp_path('result_video.mp4')
