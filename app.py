@@ -61,26 +61,26 @@ def video_translator():
 
         with st.spinner("Processing video. This may take several minutes..."):
 
-            # st.info("transcribing...")
-            # t = Transcriber()
-            # original_srt_path = t.transcribe_video(video_path)
-            #
-            # st.info("translating...")
-            # english_srt_path = translate_srt_with_gpt(original_srt_path)
-            #
-            # st.info('embedding...')
-            # subtitled_video_path = embed_subtitles(video_path, english_srt_path)
-            #
-            # st.info('sending result...')
-            # send_video_email(
-            #     video_path,
-            #     subtitled_video_path,
-            #     original_srt_path,
-            #     english_srt_path,
-            #     st.secrets["SMTP_USER"],
-            #     st.secrets["SMTP_USER"],
-            #     st.secrets["SMTP_PASS"]
-            # )
+            st.info("transcribing...")
+            t = Transcriber()
+            original_srt_path = t.transcribe_video(video_path)
+
+            st.info("translating...")
+            english_srt_path = translate_srt_with_gpt(original_srt_path)
+
+            st.info('embedding...')
+            subtitled_video_path = embed_subtitles(video_path, english_srt_path)
+
+            st.info('sending result...')
+            send_video_email(
+                video_path,
+                subtitled_video_path,
+                original_srt_path,
+                english_srt_path,
+                st.secrets["SMTP_USER"],
+                st.secrets["SMTP_USER"],
+                st.secrets["SMTP_PASS"]
+            )
 
             tmp_dir = get_tmp_path('')
             for file_name in os.listdir(tmp_dir):
