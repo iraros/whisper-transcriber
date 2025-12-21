@@ -6,6 +6,7 @@ from PIL import ImageFont, Image, ImageDraw
 from moviepy import VideoFileClip, ImageClip, CompositeVideoClip
 from moviepy.video.tools.subtitles import SubtitlesClip
 
+from modules.utils import get_tmp_path
 
 FONT_SIZE = 50
 
@@ -51,7 +52,7 @@ def create_text_image(text, video_width):
     return np.array(img)
 
 
-def embed_subtitles(video_path, srt_path, output_path="output_video.mp4"):
+def embed_subtitles(video_path, srt_path):
     video = VideoFileClip(str(video_path))
 
     # Define the generator explicitly
@@ -67,7 +68,7 @@ def embed_subtitles(video_path, srt_path, output_path="output_video.mp4"):
     subtitles = subtitles.with_position(('center', video.h * 0.6))
 
     final_video = CompositeVideoClip([video, subtitles])
-
+    output_path = get_tmp_path('result_video.mp4')
     final_video.write_videofile(
         output_path,
         fps=video.fps,
@@ -77,10 +78,12 @@ def embed_subtitles(video_path, srt_path, output_path="output_video.mp4"):
     )
 
     video.close()
+    print(f'saved to {output_path}')
     return output_path
 
 
 if __name__ == '__main__':
-    # local run example
-    embed_subtitles(video_path=r'/document_5920171835495816504.mp4',
-                    srt_path=r'/document_5920171835495816504_subs.en.srt')
+    # Local test paths
+    test_video = r'C:\Users\Ira\PycharmProjects\transcriber\tmp\document_5920171835495816504.mp4'
+    test_srt = r'C:\Users\Ira\PycharmProjects\transcriber\tmp\srt_initial_output.en.srt'
+    embed_subtitles(test_video, test_srt)
