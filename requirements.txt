@@ -1,0 +1,5 @@
+python-telegram-bot
+openai
+moviepy
+faster-whisper
+opencv-python-headless
