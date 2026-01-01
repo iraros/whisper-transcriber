@@ -5,7 +5,6 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 import logging
 import asyncio
-import tempfile
 import sys
 import subprocess
 from pathlib import Path
@@ -33,33 +32,24 @@ except ImportError as e:
     sys.exit(1)
 
 # -----------------------------------------------------------------------------
-# CONFIGURATION & MAPPING
+# CONFIGURATION & LOCAL PATH SETUP
 # -----------------------------------------------------------------------------
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN_HERE")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "YOUR_OPENAI_API_KEY_HERE")
 
-# Mapping language codes to (Flag, Full Name)
+# Ensure a local 'tmp' directory exists in the repo folder
+REPO_DIR = Path(__file__).parent.absolute()
+LOCAL_TMP_DIR = REPO_DIR / "tmp"
+LOCAL_TMP_DIR.mkdir(exist_ok=True)
+
 LANGUAGE_DATA = {
-    'ar': ('🇸🇦', 'Arabic'),
-    'he': ('🇮🇱', 'Hebrew'),
-    'ru': ('🇷🇺', 'Russian'),
-    'es': ('🇪🇸', 'Spanish'),
-    'fr': ('🇫🇷', 'French'),
-    'de': ('🇩🇪', 'German'),
-    'it': ('🇮🇹', 'Italian'),
-    'pt': ('🇵🇹', 'Portuguese'),
-    'ja': ('🇯🇵', 'Japanese'),
-    'ko': ('🇰🇷', 'Korean'),
-    'zh': ('🇨🇳', 'Chinese'),
-    'tr': ('🇹🇷', 'Turkish'),
-    'nl': ('🇳🇱', 'Dutch'),
-    'pl': ('🇵🇱', 'Polish'),
-    'uk': ('🇺🇦', 'Ukrainian'),
-    'hi': ('🇮🇳', 'Hindi'),
-    'fa': ('🇮🇷', 'Persian'),
-    'en': ('🇺🇸', 'English'),
-    'vi': ('🇻🇳', 'Vietnamese'),
-    'th': ('🇹🇭', 'Thai')
+    'ar': ('🇸🇦', 'Arabic'), 'he': ('🇮🇱', 'Hebrew'), 'ru': ('🇷🇺', 'Russian'),
+    'es': ('🇪🇸', 'Spanish'), 'fr': ('🇫🇷', 'French'), 'de': ('🇩🇪', 'German'),
+    'it': ('🇮🇹', 'Italian'), 'pt': ('🇵🇹', 'Portuguese'), 'ja': ('🇯🇵', 'Japanese'),
+    'ko': ('🇰🇷', 'Korean'), 'zh': ('🇨🇳', 'Chinese'), 'tr': ('🇹🇷', 'Turkish'),
+    'nl': ('🇳🇱', 'Dutch'), 'pl': ('🇵🇱', 'Polish'), 'uk': ('🇺🇦', 'Ukrainian'),
+    'hi': ('🇮🇳', 'Hindi'), 'fa': ('🇮🇷', 'Persian'), 'en': ('🇺🇸', 'English'),
+    'vi': ('🇻🇳', 'Vietnamese'), 'th': ('🇹🇭', 'Thai')
 }
 
 WHISPER_MODEL_SIZE = "medium"
@@ -87,24 +77,25 @@ except Exception as e:
 # VIDEO & SUBTITLE PROCESSING
 # -----------------------------------------------------------------------------
 def create_subtitled_video(input_video: str, translation_text: str, output_video: str):
-    # simple SRT block for the whole translation
+    # Use the local tmp directory for the SRT file
+    srt_filename = f"sub_{os.path.basename(input_video)}.srt"
+    srt_path = str(LOCAL_TMP_DIR / srt_filename)
+
     srt_content = f"1\n00:00:00,000 --> 00:00:59,000\n{translation_text}"
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".srt", mode='w', encoding='utf-8') as srt_file:
-        srt_file.write(srt_content)
-        srt_path = srt_file.name
+    with open(srt_path, 'w', encoding='utf-8') as f:
+        f.write(srt_content)
 
     try:
-        # FFmpeg filter paths on Windows are tricky because of the colon in drive letters.
-        # We need to escape the backslashes and wrap the path correctly.
-        clean_path = srt_path.replace("\\", "/")
-        # For Windows, we escape the colon (e.g., C\: ) and wrap in single quotes
-        escaped_srt_path = f"'{clean_path.replace(':', r'\:')}'"
+        # Standardize for Windows FFmpeg filter syntax
+        # We use forward slashes and escape the drive colon
+        escaped_srt_path = srt_path.replace("\\", "/").replace(":", "\\:")
+        subtitle_filter = f"subtitles='{escaped_srt_path}'"
 
         cmd = [
             'ffmpeg', '-y',
             '-i', input_video,
-            '-vf', f'scale=-2:480,subtitles={escaped_srt_path}',
+            '-vf', f'scale=-2:480,{subtitle_filter}',
             '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28',
             '-c:a', 'copy',
             output_video
@@ -130,24 +121,16 @@ def transcribe_locally(video_path: str):
     logger.info(f"Starting local transcription for: {video_path}")
     segments, info = whisper_model.transcribe(video_path, beam_size=5)
 
-    transcribed_text = ""
-    for segment in segments:
-        transcribed_text += segment.text + " "
-
+    transcribed_text = " ".join([s.text for s in segments])
     return transcribed_text.strip(), info.language, info.language_probability
 
 
 def translate_with_gpt(text: str, source_lang_name: str) -> str:
     logger.info("Sending text to OpenAI for translation...")
-
     system_prompt = (
-        "You are an expert translator specializing in spoken dialects. "
-        "Translate the following text into natural English. "
-        f"Source language: {source_lang_name}. "
-        "Keep the translation concise as it will be used for subtitles. "
-        "Output ONLY the translated text."
+        "You are an expert translator. Translate the text into natural English. "
+        f"Source language: {source_lang_name}. Output ONLY the translated text."
     )
-
     try:
         response = openai_client.chat.completions.create(
             model="gpt-4o",
@@ -167,15 +150,11 @@ def translate_with_gpt(text: str, source_lang_name: str) -> str:
 # TELEGRAM HANDLERS
 # -----------------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Hi! I'm your Subtitle Bot.\n\n"
-        "Send me a video, and I'll transcribe it, translate it, "
-        "and send you back a version with English subtitles!"
-    )
+    await update.message.reply_text("👋 Send me a video for English subtitles!")
 
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    status_msg = await update.message.reply_text("📥 Downloading media...")
+    status_msg = await update.message.reply_text("📥 Processing...")
 
     if update.message.video:
         file_id = update.message.video.file_id
@@ -186,17 +165,15 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         return
 
-    temp_input = None
-    temp_output = None
+    # Use local tmp paths
+    temp_input = str(LOCAL_TMP_DIR / f"input_{file_id}{ext}")
+    temp_output = str(LOCAL_TMP_DIR / f"output_{file_id}{ext}")
 
     try:
         new_file = await context.bot.get_file(file_id)
-        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as f:
-            temp_input = f.name
         await new_file.download_to_drive(custom_path=temp_input)
 
-        # Step 1: Transcribe
-        await status_msg.edit_text("⚙️ Transcribing locally...")
+        await status_msg.edit_text("⚙️ Transcribing...")
         loop = asyncio.get_running_loop()
         transcript, lang_code, prob = await loop.run_in_executor(None, transcribe_locally, temp_input)
 
@@ -204,56 +181,37 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status_msg.edit_text("⚠️ No speech detected.")
             return
 
-        # Get flag and full name from mapping
         source_flag, source_name = LANGUAGE_DATA.get(lang_code, ('🌍', lang_code.upper()))
 
-        # Step 2: Translate
-        await status_msg.edit_text(f"{source_flag} {source_name} ({prob:.2f}) -> Translating...")
+        # Step 2: Translate - Updated status message as requested
+        await status_msg.edit_text(f"Translating: {source_flag} {source_name} ({prob:.2f}) -> 🇺🇸 English...")
         translation = await loop.run_in_executor(None, translate_with_gpt, transcript, source_name)
 
-        # Step 3: Subtitle Video
-        await status_msg.edit_text("🎬 Rendering subtitled video (480p)...")
-        temp_output = temp_input.replace(ext, f"_subtitled{ext}")
+        await status_msg.edit_text("🎬 Rendering video...")
         success = await loop.run_in_executor(None, create_subtitled_video, temp_input, translation, temp_output)
 
-        # Step 4: Finalize
-        # Combine everything into a single caption with full names
         caption_text = (
             f"{source_flag} **Original ({source_name}):**\n{transcript}\n\n"
-            f"🇺🇸 **Translation (English):**\n{translation}"
+            f"🇺🇸 **Translation:**\n{translation}"
         )
 
         if success:
-            await status_msg.edit_text("✅ Done! Sending video...")
-            if len(caption_text) > 1024:
-                await update.message.reply_video(video=open(temp_output, 'rb'))
-                for i in range(0, len(caption_text), 4000):
-                    await update.message.reply_text(caption_text[i:i + 4000], parse_mode="Markdown")
-            else:
-                await update.message.reply_video(
-                    video=open(temp_output, 'rb'),
-                    caption=caption_text,
-                    parse_mode="Markdown"
-                )
+            await status_msg.edit_text("✅ Sending...")
+            await update.message.reply_video(video=open(temp_output, 'rb'), caption=caption_text[:1024],
+                                             parse_mode="Markdown")
         else:
-            # Fallback for render failure
-            await status_msg.edit_text(f"⚠️ Render failed. Sending text only:")
-            for i in range(0, len(caption_text), 4000):
-                await update.message.reply_text(caption_text[i:i + 4000], parse_mode="Markdown")
+            await status_msg.edit_text("⚠️ Render failed. Sending text only.")
+            await update.message.reply_text(caption_text, parse_mode="Markdown")
 
     except Exception as e:
         logger.error(f"Error: {e}")
         await status_msg.edit_text(f"❌ Error: {str(e)}")
-
     finally:
         for path in [temp_input, temp_output]:
             if path and os.path.exists(path):
                 os.remove(path)
 
 
-# -----------------------------------------------------------------------------
-# MAIN APP
-# -----------------------------------------------------------------------------
 if __name__ == '__main__':
     if "YOUR_TELEGRAM_BOT_TOKEN_HERE" in TELEGRAM_BOT_TOKEN:
         print("CRITICAL: Set your TELEGRAM_BOT_TOKEN.")
