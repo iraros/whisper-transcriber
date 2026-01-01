@@ -8,7 +8,18 @@ import asyncio
 import sys
 import subprocess
 import textwrap
+import cv2
+import numpy as np
 from pathlib import Path
+
+# Handle MoviePy v1 and v2 import differences
+try:
+    from moviepy.editor import VideoFileClip
+except ImportError:
+    try:
+        from moviepy import VideoFileClip
+    except ImportError:
+        print("❌ CRITICAL: 'moviepy' not found. Please run: pip install moviepy")
 
 # -----------------------------------------------------------------------------
 # DEPENDENCY CHECK
@@ -18,7 +29,8 @@ try:
     from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 except ImportError:
     print("\n" + "!" * 60)
-    print("CRITICAL IMPORT ERROR: 'python-telegram-bot' not found.")
+    print("CRITICAL IMPORT ERROR")
+    print("The 'telegram' module was not found or is the wrong version.")
     print("Please run: pip uninstall telegram && pip install python-telegram-bot")
     print("!" * 60 + "\n")
     sys.exit(1)
@@ -32,7 +44,7 @@ except ImportError as e:
     sys.exit(1)
 
 # -----------------------------------------------------------------------------
-# CONFIGURATION & LOCAL PATH SETUP
+# CONFIGURATION & PATH SETUP
 # -----------------------------------------------------------------------------
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN_HERE")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "YOUR_OPENAI_API_KEY_HERE")
@@ -41,9 +53,11 @@ REPO_DIR = Path(__file__).parent.absolute()
 LOCAL_TMP_DIR = REPO_DIR / "tmp"
 LOCAL_TMP_DIR.mkdir(exist_ok=True)
 
+FILES_FROM_PREVIOUS_RUN = []
+
 LANGUAGE_DATA = {
     'ar': ('🇸🇦', 'Arabic'), 'he': ('🇮🇱', 'Hebrew'), 'ru': ('🇷🇺', 'Russian'),
-    'es': ('🇪🇸', 'Spanish'), 'fr': ('🇮🇷', 'French'), 'de': ('🇩🇪', 'German'),
+    'es': ('🇪🇸', 'Spanish'), 'fr': ('🇫🇷', 'French'), 'de': ('🇩🇪', 'German'),
     'it': ('🇮🇹', 'Italian'), 'pt': ('🇵🇹', 'Portuguese'), 'ja': ('🇯🇵', 'Japanese'),
     'ko': ('🇰🇷', 'Korean'), 'zh': ('🇨🇳', 'Chinese'), 'tr': ('🇹🇷', 'Turkish'),
     'nl': ('🇳🇱', 'Dutch'), 'pl': ('🇵🇱', 'Polish'), 'uk': ('🇺🇦', 'Ukrainian'),
@@ -66,254 +80,196 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY)
 logger.info(f"Loading Whisper model: {WHISPER_MODEL_SIZE}...")
 try:
     whisper_model = WhisperModel(WHISPER_MODEL_SIZE, device=DEVICE_TYPE, compute_type=COMPUTE_TYPE)
-    logger.info("Whisper model loaded successfully.")
 except Exception as e:
     logger.error(f"Failed to load Whisper model: {e}")
     whisper_model = None
 
 
 # -----------------------------------------------------------------------------
-# HELPERS
+# UTILS
 # -----------------------------------------------------------------------------
-def format_timestamp(seconds: float) -> str:
-    """Converts seconds to SRT timestamp format: HH:MM:SS,mmm"""
+def format_timestamp(seconds: float):
+    """Converts seconds to SRT timestamp format (HH:MM:SS,mmm)"""
+    milliseconds = int((seconds - int(seconds)) * 1000)
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
     secs = int(seconds % 60)
-    millis = int((seconds - int(seconds)) * 1000)
-    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
-
-
-def split_line_balanced(words: list) -> list:
-    """
-    Splits a list of words into two strings such that the length
-    difference between the two lines is minimized.
-    """
-    if not words: return [""]
-    lens = [len(word) for word in words]
-    for i in range(1, len(words)):
-        current_diff = abs(sum(lens[:i]) - sum(lens[i:]))
-        previous_diff = abs(sum(lens[:i - 1]) - sum(lens[i - 1:]))
-        if current_diff >= previous_diff:
-            line1 = ' '.join(words[:i - 1])
-            line2 = ' '.join(words[i - 1:])
-            return [line1, line2] if line2 else [line1]
-
-    return [' '.join(words)]
+    return f"{hours:02}:{minutes:02}:{secs:02},{milliseconds:03}"
 
 
 # -----------------------------------------------------------------------------
-# VIDEO & SUBTITLE PROCESSING
+# SUBTITLE RENDERING LOGIC (Manual OpenCV + MoviePy)
 # -----------------------------------------------------------------------------
-def create_subtitled_video(input_video_path: str, segments: list, output_video_path: str, srt_debug_path: str):
-    """
-    Burns timed subtitles into pixels using 'drawtext'.
-    Also saves a valid .srt file for local debug.
-    """
-    # 1. Save SRT file for local debug
+def draw_text_with_outline(img, text, font=cv2.FONT_HERSHEY_DUPLEX, font_scale=1.2, thickness=2):
+    """Draws Arial-style bold subtitles with a thick black outline."""
+    h, w, _ = img.shape
+    max_width_chars = max(15, int(w / 30))
+    wrapped_lines = textwrap.wrap(text, width=max_width_chars)
+
+    line_height = int(50 * font_scale)
+    bottom_margin = 80
+
+    total_text_height = len(wrapped_lines) * line_height
+    start_y = h - total_text_height - bottom_margin
+
+    for i, line in enumerate(wrapped_lines):
+        text_size = cv2.getTextSize(line, font, font_scale, thickness)[0]
+        text_x = (w - text_size[0]) // 2
+        text_y = start_y + (i * line_height) + text_size[1]
+
+        cv2.putText(img, line, (text_x, text_y), font, font_scale, (0, 0, 0), thickness + 4, cv2.LINE_AA)
+        cv2.putText(img, line, (text_x, text_y), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
+
+
+def create_subtitled_video(input_video: str, timed_segments: list, output_video: str):
+    """Manually renders subtitles and merges audio."""
+    cap = cv2.VideoCapture(input_video)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    temp_silent = str(LOCAL_TMP_DIR / f"silent_{os.path.basename(input_video)}")
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(temp_silent, fourcc, fps, (width, height))
+
+    frame_count = 0
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret: break
+
+        current_time = frame_count / fps
+        active_text = next((s['text'] for s in timed_segments if s['start'] <= current_time <= s['end']), None)
+
+        if active_text:
+            draw_text_with_outline(frame, active_text)
+
+        out.write(frame)
+        frame_count += 1
+
+    cap.release()
+    out.release()
+
     try:
-        with open(srt_debug_path, "w", encoding="utf-8") as f:
-            for i, seg in enumerate(segments):
-                start_srt = format_timestamp(seg['start'])
-                end_srt = format_timestamp(seg['end'])
-                f.write(f"{i + 1}\n{start_srt} --> {end_srt}\n{seg['text']}\n\n")
-        logger.info(f"Debug SRT saved to: {srt_debug_path}")
-    except Exception as e:
-        logger.error(f"Failed to save debug SRT: {e}")
+        orig_clip = VideoFileClip(input_video)
+        rendered_clip = VideoFileClip(temp_silent)
 
-    # 2. Prepare FFmpeg Drawtext Filter
-    filter_chains = []
-    MAX_LINE_CHARS = 25  # Threshold for balanced split
-    MAX_WIDTH_WRAP = 35  # Absolute hard wrap to prevent screen overflow
-
-    for i, seg in enumerate(segments):
-        # FIX: Some videos skip drawtext if it starts exactly at 0.0
-        start_time = max(0.0, seg['start'])
-        if i == 0 and start_time < 0.1:
-            start_time = 0.05  # Tiny offset to ensure visibility
-
-        words = seg['text'].split()
-
-        # Apply balanced splitting logic
-        if len(seg['text']) > MAX_LINE_CHARS:
-            balanced_lines = split_line_balanced(words)
-            # Final safety wrap to ensure no line exceeds screen width
-            final_lines = []
-            for bl in balanced_lines:
-                final_lines.extend(textwrap.wrap(bl, width=MAX_WIDTH_WRAP))
-            wrapped_text = "\n".join(final_lines)
+        if hasattr(rendered_clip, 'with_audio'):
+            final_clip = rendered_clip.with_audio(orig_clip.audio)
         else:
-            wrapped_text = seg['text']
+            final_clip = rendered_clip.set_audio(orig_clip.audio)
 
-        safe_text = wrapped_text.replace("'", "'\\''").replace(":", "\\:")
+        final_clip.write_videofile(output_video, codec="libx264", audio_codec="aac", logger=None)
 
-        # UI Adjustments:
-        # fontsize=48
-        # y=h-th-60 (Anchored to bottom with 60px margin, handles multiline automatically)
-        draw_filter = (
-            f"drawtext=text='{safe_text}':fontcolor=white:fontsize=48:"
-            f"box=1:boxcolor=black@0.6:boxborderw=15:"
-            f"line_spacing=10:x=(w-text_w)/2:y=h-th-60:"
-            f"enable='between(t,{start_time:.4f},{seg['end']:.4f})'"
-        )
-        filter_chains.append(draw_filter)
-
-    full_vf = ",".join(filter_chains)
-
-    try:
-        cmd = [
-            'ffmpeg', '-y',
-            '-i', input_video_path,
-            '-vf', full_vf,
-            '-c:v', 'libx264',
-            '-preset', 'veryfast',
-            '-crf', '26',
-            '-c:a', 'copy',
-            output_video_path
-        ]
-
-        logger.info(f"Running FFmpeg render...")
-        process = subprocess.run(cmd, capture_output=True, text=True)
-
-        if process.returncode != 0:
-            logger.error(f"FFmpeg failed: {process.stderr}")
-            return False
+        orig_clip.close()
+        rendered_clip.close()
+        if os.path.exists(temp_silent):
+            os.remove(temp_silent)
         return True
     except Exception as e:
-        logger.error(f"Exception during subtitle rendering: {str(e)}")
+        logger.error(f"Media merge failed: {e}")
         return False
 
 
 # -----------------------------------------------------------------------------
 # TRANSCRIPTION & TRANSLATION LOGIC
 # -----------------------------------------------------------------------------
-def transcribe_and_translate_segments(video_path: str):
-    if whisper_model is None:
-        raise RuntimeError("Whisper model failed to load.")
+def transcribe_and_translate(video_path: str):
+    segments, info = whisper_model.transcribe(video_path, beam_size=5)
 
-    logger.info(f"Starting timed transcription: {video_path}")
-    segments_gen, info = whisper_model.transcribe(video_path, beam_size=5)
+    segments_list = list(segments)
+    # Joining with a delimiter so GPT can translate while keeping segments distinct
+    full_transcript_str = " || ".join([s.text.strip() for s in segments_list])
 
-    raw_segments = list(segments_gen)
-    if not raw_segments:
-        return [], info.language, 0, "", ""
+    source_name = LANGUAGE_DATA.get(info.language, ('🌍', info.language.upper()))[1]
 
-    full_text = " || ".join([s.text.strip() for s in raw_segments])
-    _, source_name = LANGUAGE_DATA.get(info.language, ('🌍', info.language.upper()))
-
-    system_prompt = (
-        "You are an expert movie subtitle translator. Translate the text into natural English. "
-        "The input segments are separated by ' || '. Maintain the same number of segments in your output, "
-        "separated by ' || '. Output ONLY the translated segments."
+    # Improved GPT Translation Prompt to maintain segments
+    response = openai_client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system",
+             "content": f"Translate to natural English subtitles. Maintain the ' || ' delimiters to keep segment timing. Source: {source_name}. Output ONLY translation."},
+            {"role": "user", "content": full_transcript_str}
+        ],
+        temperature=0.3
     )
+    translation_blob = response.choices[0].message.content
+    translated_parts = [p.strip() for p in translation_blob.split("||")]
 
-    try:
-        response = openai_client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": full_text}
-            ],
-            temperature=0.3
-        )
-        translated_blob = response.choices[0].message.content
-        translated_list = [t.strip() for t in translated_blob.split("||")]
-    except Exception as e:
-        logger.error(f"OpenAI Error: {e}")
-        translated_list = [s.text for s in raw_segments]
+    timed_segments = []
+    for i, s in enumerate(segments_list):
+        # Fallback to original text if GPT messed up the segment count
+        text = translated_parts[i] if i < len(translated_parts) else s.text
+        timed_segments.append({'start': s.start, 'end': s.end, 'text': text})
 
-    final_segments = []
-    full_transcript_parts = []
-    full_translation_parts = []
+    full_orig = " ".join([s.text for s in segments_list])
+    full_trans = " ".join(translated_parts)
 
-    for i, orig in enumerate(raw_segments):
-        text = translated_list[i] if i < len(translated_list) else orig.text
-        final_segments.append({
-            'start': orig.start,
-            'end': orig.end,
-            'text': text
-        })
-        full_transcript_parts.append(orig.text.strip())
-        full_translation_parts.append(text.strip())
-
-    return final_segments, info.language, info.language_probability, " ".join(full_transcript_parts), " ".join(
-        full_translation_parts)
+    return full_orig, full_trans, timed_segments, info.language, info.language_probability
 
 
 # -----------------------------------------------------------------------------
 # TELEGRAM HANDLERS
 # -----------------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Hi! Send me a video for movie-style English subtitles!")
+    await update.message.reply_text("👋 Send me a video for high-quality English subtitles!")
 
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    status_msg = await update.message.reply_text("📥 Downloading media...")
+    global FILES_FROM_PREVIOUS_RUN
 
-    file_id = None
-    if update.message.video:
-        file_id = update.message.video.file_id
-    elif update.message.video_note:
-        file_id = update.message.video_note.file_id
+    if FILES_FROM_PREVIOUS_RUN:
+        for old_path in FILES_FROM_PREVIOUS_RUN:
+            try:
+                if os.path.exists(old_path): os.remove(old_path)
+            except:
+                pass
+        FILES_FROM_PREVIOUS_RUN = []
 
-    if not file_id: return
+    status_msg = await update.message.reply_text("📥 Processing...")
+    media = update.message.video or update.message.video_note
+    if not media: return
 
-    # Persistence for local debug
-    temp_input = str(LOCAL_TMP_DIR / f"in_{file_id}.mp4")
-    temp_output = str(LOCAL_TMP_DIR / f"out_{file_id}.mp4")
-    temp_srt = str(LOCAL_TMP_DIR / f"sub_{file_id}.srt")
+    file_id = media.file_id
+    unique_id = f"proc_{file_id[:10]}"
+    temp_in = str(LOCAL_TMP_DIR / f"{unique_id}_in.mp4")
+    temp_out = str(LOCAL_TMP_DIR / f"{unique_id}_out.mp4")
+    temp_srt = str(LOCAL_TMP_DIR / f"{unique_id}.srt")
 
     try:
         new_file = await context.bot.get_file(file_id)
-        await new_file.download_to_drive(custom_path=temp_input)
+        await new_file.download_to_drive(custom_path=temp_in)
 
-        await status_msg.edit_text("⚙️ Transcribing & Syncing timestamps...")
+        await status_msg.edit_text("⚙️ Transcribing & Translating...")
         loop = asyncio.get_running_loop()
-        timed_segments, lang_code, prob, orig_text, trans_text = await loop.run_in_executor(None,
-                                                                                            transcribe_and_translate_segments,
-                                                                                            temp_input)
+        orig, trans, segments, l_code, prob = await loop.run_in_executor(None, transcribe_and_translate, temp_in)
 
-        if not timed_segments:
-            await status_msg.edit_text("⚠️ No speech detected in the video.")
-            return
+        # Save SRT with proper timings
+        with open(temp_srt, "w", encoding="utf-8") as f:
+            for i, seg in enumerate(segments):
+                f.write(
+                    f"{i + 1}\n{format_timestamp(seg['start'])} --> {format_timestamp(seg['end'])}\n{seg['text']}\n\n")
 
-        source_flag, source_name = LANGUAGE_DATA.get(lang_code, ('🌍', lang_code.upper()))
+        await status_msg.edit_text("🎬 Rendering video with synced subtitles...")
+        # CRITICAL FIX: Pass the 'segments' list (with individual start/end) instead of a single giant block
+        success = await loop.run_in_executor(None, create_subtitled_video, temp_in, segments, temp_out)
 
-        await status_msg.edit_text(
-            f"{source_flag} Detected {source_name} ({prob:.2%})\n🎬 Rendering movie-style subtitles...")
-        success = await loop.run_in_executor(None, create_subtitled_video, temp_input, timed_segments, temp_output,
-                                             temp_srt)
-
-        caption = (
-            f"{source_flag} **Original ({source_name}):**\n{orig_text[:400]}...\n\n"
-            f"🇺🇸 **English Translation:**\n{trans_text[:400]}..."
-        )
-
+        caption = f"🇺🇸 **Translation:**\n{trans}"
         if success:
-            await status_msg.edit_text("✅ Done! Sending video...")
-            await update.message.reply_video(
-                video=open(temp_output, 'rb'),
-                caption=caption[:1024],
-                parse_mode="Markdown"
-            )
+            await status_msg.edit_text("✅ Done! Uploading...")
+            await update.message.reply_video(video=open(temp_out, 'rb'), caption=caption[:1024], parse_mode="Markdown")
         else:
-            await status_msg.edit_text("⚠️ Render failed. Check logs.")
+            await status_msg.edit_text("⚠️ Render failed. Sending text.")
+            await update.message.reply_text(caption)
 
     except Exception as e:
         logger.error(f"Error: {e}")
         await status_msg.edit_text(f"❌ Error: {str(e)}")
-    finally:
-        # All files (mp4 and srt) are kept in /tmp/ for debugging
-        pass
+
+    FILES_FROM_PREVIOUS_RUN.extend([temp_in, temp_out, temp_srt])
 
 
 if __name__ == '__main__':
-    if "YOUR_TELEGRAM_BOT_TOKEN_HERE" in TELEGRAM_BOT_TOKEN:
-        print("CRITICAL: Set your TELEGRAM_BOT_TOKEN.")
-        sys.exit(1)
-
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.VIDEO | filters.VIDEO_NOTE, handle_video))
-    print("--- Bot is running ---")
     app.run_polling()
