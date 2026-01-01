@@ -43,7 +43,7 @@ LOCAL_TMP_DIR.mkdir(exist_ok=True)
 
 LANGUAGE_DATA = {
     'ar': ('🇸🇦', 'Arabic'), 'he': ('🇮🇱', 'Hebrew'), 'ru': ('🇷🇺', 'Russian'),
-    'es': ('🇪🇸', 'Spanish'), 'fr': ('🇫🇷', 'French'), 'de': ('🇩🇪', 'German'),
+    'es': ('🇪🇸', 'Spanish'), 'fr': ('🇮🇷', 'French'), 'de': ('🇩🇪', 'German'),
     'it': ('🇮🇹', 'Italian'), 'pt': ('🇵🇹', 'Portuguese'), 'ja': ('🇯🇵', 'Japanese'),
     'ko': ('🇰🇷', 'Korean'), 'zh': ('🇨🇳', 'Chinese'), 'tr': ('🇹🇷', 'Turkish'),
     'nl': ('🇳🇱', 'Dutch'), 'pl': ('🇵🇱', 'Polish'), 'uk': ('🇺🇦', 'Ukrainian'),
@@ -89,6 +89,7 @@ def split_line_balanced(words: list) -> list:
     Splits a list of words into two strings such that the length
     difference between the two lines is minimized.
     """
+    if not words: return [""]
     lens = [len(word) for word in words]
     for i in range(1, len(words)):
         current_diff = abs(sum(lens[:i]) - sum(lens[i:]))
@@ -122,25 +123,38 @@ def create_subtitled_video(input_video_path: str, segments: list, output_video_p
 
     # 2. Prepare FFmpeg Drawtext Filter
     filter_chains = []
-    MAX_LINE_LENGTH = 25  # Threshold to trigger balanced splitting
+    MAX_LINE_CHARS = 25  # Threshold for balanced split
+    MAX_WIDTH_WRAP = 35  # Absolute hard wrap to prevent screen overflow
 
-    for seg in segments:
+    for i, seg in enumerate(segments):
+        # FIX: Some videos skip drawtext if it starts exactly at 0.0
+        start_time = max(0.0, seg['start'])
+        if i == 0 and start_time < 0.1:
+            start_time = 0.05  # Tiny offset to ensure visibility
+
         words = seg['text'].split()
 
-        # Use balanced splitting logic if text is long enough
-        if len(seg['text']) > MAX_LINE_LENGTH:
-            lines = split_line_balanced(words)
-            wrapped_text = "\n".join(lines)
+        # Apply balanced splitting logic
+        if len(seg['text']) > MAX_LINE_CHARS:
+            balanced_lines = split_line_balanced(words)
+            # Final safety wrap to ensure no line exceeds screen width
+            final_lines = []
+            for bl in balanced_lines:
+                final_lines.extend(textwrap.wrap(bl, width=MAX_WIDTH_WRAP))
+            wrapped_text = "\n".join(final_lines)
         else:
             wrapped_text = seg['text']
 
         safe_text = wrapped_text.replace("'", "'\\''").replace(":", "\\:")
 
+        # UI Adjustments:
+        # fontsize=48
+        # y=h-th-60 (Anchored to bottom with 60px margin, handles multiline automatically)
         draw_filter = (
-            f"drawtext=text='{safe_text}':fontcolor=white:fontsize=32:"
-            f"box=1:boxcolor=black@0.6:boxborderw=10:"
-            f"line_spacing=5:x=(w-text_w)/2:y=h-th-40:"
-            f"enable='between(t,{seg['start']:.3f},{seg['end']:.3f})'"
+            f"drawtext=text='{safe_text}':fontcolor=white:fontsize=48:"
+            f"box=1:boxcolor=black@0.6:boxborderw=15:"
+            f"line_spacing=10:x=(w-text_w)/2:y=h-th-60:"
+            f"enable='between(t,{start_time:.4f},{seg['end']:.4f})'"
         )
         filter_chains.append(draw_filter)
 
