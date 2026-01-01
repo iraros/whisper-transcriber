@@ -6,8 +6,6 @@ import textwrap
 import cv2
 import shutil
 from pathlib import Path
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import threading
 
 # WORKAROUND for libiomp5md.dll error on some Windows environments
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -19,7 +17,7 @@ except ImportError:
     try:
         from moviepy import VideoFileClip
     except ImportError:
-        print("❌ CRITICAL: 'moviepy' not found.")
+        print("❌ CRITICAL: 'moviepy' not found. Please run: pip install moviepy")
 
 # -----------------------------------------------------------------------------
 # DEPENDENCY CHECK
@@ -28,30 +26,30 @@ try:
     from telegram import Update
     from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 except ImportError:
-    print("CRITICAL: 'python-telegram-bot' not found.")
+    print("\n" + "!" * 60 + "\nCRITICAL: 'python-telegram-bot' not found.\n" + "!" * 60 + "\n")
     sys.exit(1)
 
 try:
     from faster_whisper import WhisperModel
     from openai import OpenAI
-except ImportError:
+except ImportError as e:
+    print(f"\nCRITICAL: Missing dependency {e.name}. Run: pip install faster-whisper openai")
     sys.exit(1)
 
 # -----------------------------------------------------------------------------
 # CONFIGURATION
 # -----------------------------------------------------------------------------
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN_HERE")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "YOUR_OPENAI_API_KEY_HERE")
 TRANSLATION_MODEL = os.getenv("TRANSLATION_MODEL", "gpt-4o-mini")
-PORT = int(os.getenv("PORT", "8080"))  # Required for Cloud Run
 
-# Hybrid setting: True = use OpenAI API for faster/better results
 USE_CLOUD_WHISPER = True
 
 BASE_DIR = Path(__file__).parent.absolute()
 LOCAL_TMP_DIR = BASE_DIR / "tmp"
 LOCAL_TMP_DIR.mkdir(parents=True, exist_ok=True)
 
+# Dictionary keyed by ISO 639-1 language codes
 LANGUAGE_DATA = {
     'ar': ('🇸🇦', 'Arabic'), 'he': ('🇮🇱', 'Hebrew'), 'ru': ('🇷🇺', 'Russian'),
     'es': ('🇪🇸', 'Spanish'), 'fr': ('🇫🇷', 'French'), 'de': ('🇩🇪', 'German'),
@@ -66,25 +64,11 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=lo
 logger = logging.getLogger(__name__)
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
+whisper_model = None if USE_CLOUD_WHISPER else WhisperModel("medium", device="cpu", compute_type="int8")
 
 
 # -----------------------------------------------------------------------------
-# HEALTH CHECK SERVER (For Cloud Run)
-# -----------------------------------------------------------------------------
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot is running")
-
-
-def run_health_server():
-    server = HTTPServer(('0.0.0.0', PORT), HealthCheckHandler)
-    server.serve_forever()
-
-
-# -----------------------------------------------------------------------------
-# CORE LOGIC
+# UTILS
 # -----------------------------------------------------------------------------
 def cleanup_temp_folder():
     for file_path in LOCAL_TMP_DIR.glob('*'):
@@ -93,8 +77,8 @@ def cleanup_temp_folder():
                 file_path.unlink()
             elif file_path.is_dir():
                 shutil.rmtree(file_path)
-        except:
-            pass
+        except Exception as e:
+            logger.error(f'Cleanup error: {e}')
 
 
 def draw_text_with_outline(img, text):
@@ -115,7 +99,8 @@ def draw_text_with_outline(img, text):
 
 def create_subtitled_video(input_video: str, segments: list, output_video: str):
     cap = cv2.VideoCapture(input_video)
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if not fps or fps < 1: fps = 30.0
     w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     temp_silent = str(LOCAL_TMP_DIR / "silent_tmp.mp4")
     out = cv2.VideoWriter(temp_silent, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
@@ -150,25 +135,30 @@ def create_subtitled_video(input_video: str, segments: list, output_video: str):
 
 async def transcribe_and_translate(video_path: str, update_func):
     loop = asyncio.get_running_loop()
-    await update_func("☁️ Extracting audio...")
-    audio_path = str(LOCAL_TMP_DIR / "audio.m4a")
+    if USE_CLOUD_WHISPER:
+        await update_func("☁️ Extracting audio...")
+        audio_path = str(LOCAL_TMP_DIR / "audio.m4a")
 
-    def ext():
-        with VideoFileClip(video_path) as v:
-            v.audio.write_audiofile(audio_path, codec='aac', logger=None)
+        def ext():
+            with VideoFileClip(video_path) as v:
+                v.audio.write_audiofile(audio_path, codec='aac', logger=None)
 
-    await loop.run_in_executor(None, ext)
+        await loop.run_in_executor(None, ext)
 
-    res = await loop.run_in_executor(None, lambda: openai_client.audio.transcriptions.create(
-        model="whisper-1", file=open(audio_path, "rb"), response_format="verbose_json",
-        timestamp_granularities=["segment"]
-    ))
-    raw_segs, lang = res.segments, res.language
+        res = await loop.run_in_executor(None, lambda: openai_client.audio.transcriptions.create(
+            model="whisper-1", file=open(audio_path, "rb"), response_format="verbose_json",
+            timestamp_granularities=["segment"]
+        ))
+        raw_segs, lang = res.segments, res.language
+    else:
+        await update_func("⚙️ Local transcription...")
+        segs_gen, info = whisper_model.transcribe(video_path)
+        raw_segs, lang = list(segs_gen), info.language
 
     if not raw_segs: return None
 
     full_text = " || ".join([s.text.strip() if hasattr(s, 'text') else s['text'].strip() for s in raw_segs])
-    await update_func(f"✨ Translating ({lang.upper()})...")
+    await update_func(f"✨ Translating from {lang.upper()}...")
 
     gpt = await loop.run_in_executor(None, lambda: openai_client.chat.completions.create(
         model=TRANSLATION_MODEL, messages=[
@@ -214,7 +204,10 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         success = await asyncio.get_running_loop().run_in_executor(None, create_subtitled_video, t_in, segments, t_out)
 
         if success:
-            flag, name = LANGUAGE_DATA.get(l_code, ('🌍', l_code.upper()))
+            # Normalize l_code to lower case to match dictionary keys
+            clean_code = l_code.lower()[:2]
+            flag, name = LANGUAGE_DATA.get(clean_code, ('🌍', clean_code.upper()))
+
             cap = f"{flag} **Original:**\n{orig}\n\n🇺🇸 **English:**\n{trans}"
             await msg.delete()
             await update.message.reply_video(video=open(t_out, 'rb'), caption=cap[:1024], parse_mode="Markdown")
@@ -228,18 +221,9 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 if __name__ == '__main__':
-    if not TELEGRAM_BOT_TOKEN:
-        print("Set TELEGRAM_BOT_TOKEN")
-        sys.exit(1)
-
     cleanup_temp_folder()
-
-    # Start Health Check Server in background thread for Cloud Run
-    threading.Thread(target=run_health_server, daemon=True).start()
-
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("Send a video!")))
     app.add_handler(MessageHandler(filters.VIDEO | filters.VIDEO_NOTE, handle_video))
-
-    print(f"Bot starting... Health check on port {PORT}")
+    print("🚀 Bot is starting...")
     app.run_polling()
