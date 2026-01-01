@@ -1,16 +1,14 @@
 import os
-
-# WORKAROUND for libiomp5md.dll error on Windows
-os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-
 import logging
 import asyncio
 import sys
-import subprocess
 import textwrap
 import cv2
-import numpy as np
+import shutil
 from pathlib import Path
+
+# WORKAROUND for libiomp5md.dll error on some Windows environments
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 # Handle MoviePy v1 and v2 import differences
 try:
@@ -28,32 +26,29 @@ try:
     from telegram import Update
     from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 except ImportError:
-    print("\n" + "!" * 60)
-    print("CRITICAL IMPORT ERROR")
-    print("The 'telegram' module was not found or is the wrong version.")
-    print("Please run: pip uninstall telegram && pip install python-telegram-bot")
-    print("!" * 60 + "\n")
+    print("\n" + "!" * 60 + "\nCRITICAL: 'python-telegram-bot' not found.\n" + "!" * 60 + "\n")
     sys.exit(1)
 
 try:
     from faster_whisper import WhisperModel
     from openai import OpenAI
 except ImportError as e:
-    print(f"\nCRITICAL IMPORT ERROR: Missing dependency {e.name}")
-    print(f"Please run: pip install faster-whisper openai")
+    print(f"\nCRITICAL: Missing dependency {e.name}. Run: pip install faster-whisper openai")
     sys.exit(1)
 
 # -----------------------------------------------------------------------------
-# CONFIGURATION & PATH SETUP
+# CONFIGURATION
 # -----------------------------------------------------------------------------
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN_HERE")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "YOUR_OPENAI_API_KEY_HERE")
+TRANSLATION_MODEL = os.getenv("TRANSLATION_MODEL", "gpt-4o")
 
-REPO_DIR = Path(__file__).parent.absolute()
-LOCAL_TMP_DIR = REPO_DIR / "tmp"
-LOCAL_TMP_DIR.mkdir(exist_ok=True)
+# Hybrid setting: True = use OpenAI API for faster/better results; False = use local CPU
+USE_CLOUD_WHISPER = True
 
-FILES_FROM_PREVIOUS_RUN = []
+BASE_DIR = Path(__file__).parent.absolute()
+LOCAL_TMP_DIR = BASE_DIR / "tmp"
+LOCAL_TMP_DIR.mkdir(parents=True, exist_ok=True)
 
 LANGUAGE_DATA = {
     'ar': ('🇸🇦', 'Arabic'), 'he': ('🇮🇱', 'Hebrew'), 'ru': ('🇷🇺', 'Russian'),
@@ -65,211 +60,172 @@ LANGUAGE_DATA = {
     'vi': ('🇻🇳', 'Vietnamese'), 'th': ('🇹🇭', 'Thai')
 }
 
-WHISPER_MODEL_SIZE = "medium"
-DEVICE_TYPE = "cpu"
-COMPUTE_TYPE = "int8"
-
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
-
-logger.info(f"Loading Whisper model: {WHISPER_MODEL_SIZE}...")
-try:
-    whisper_model = WhisperModel(WHISPER_MODEL_SIZE, device=DEVICE_TYPE, compute_type=COMPUTE_TYPE)
-except Exception as e:
-    logger.error(f"Failed to load Whisper model: {e}")
-    whisper_model = None
+whisper_model = None if USE_CLOUD_WHISPER else WhisperModel("medium", device="cpu", compute_type="int8")
 
 
 # -----------------------------------------------------------------------------
 # UTILS
 # -----------------------------------------------------------------------------
-def format_timestamp(seconds: float):
-    """Converts seconds to SRT timestamp format (HH:MM:SS,mmm)"""
-    milliseconds = int((seconds - int(seconds)) * 1000)
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    secs = int(seconds % 60)
-    return f"{hours:02}:{minutes:02}:{secs:02},{milliseconds:03}"
+def cleanup_temp_folder():
+    for file_path in LOCAL_TMP_DIR.glob('*'):
+        try:
+            if file_path.is_file():
+                file_path.unlink()
+            elif file_path.is_dir():
+                shutil.rmtree(file_path)
+        except Exception as e:
+            logger.error(f'Cleanup error: {e}')
 
 
-# -----------------------------------------------------------------------------
-# SUBTITLE RENDERING LOGIC (Manual OpenCV + MoviePy)
-# -----------------------------------------------------------------------------
-def draw_text_with_outline(img, text, font=cv2.FONT_HERSHEY_DUPLEX, font_scale=1.2, thickness=2):
-    """Draws Arial-style bold subtitles with a thick black outline."""
+def draw_text_with_outline(img, text):
     h, w, _ = img.shape
-    max_width_chars = max(15, int(w / 30))
-    wrapped_lines = textwrap.wrap(text, width=max_width_chars)
-
-    line_height = int(50 * font_scale)
-    bottom_margin = 80
-
-    total_text_height = len(wrapped_lines) * line_height
-    start_y = h - total_text_height - bottom_margin
+    font = cv2.FONT_HERSHEY_DUPLEX
+    font_scale = 1.1
+    thickness = 2
+    wrapped_lines = textwrap.wrap(text, width=max(15, int(w / 28)))
+    line_height = int(45 * font_scale)
+    start_y = h - (len(wrapped_lines) * line_height) - 80
 
     for i, line in enumerate(wrapped_lines):
         text_size = cv2.getTextSize(line, font, font_scale, thickness)[0]
-        text_x = (w - text_size[0]) // 2
-        text_y = start_y + (i * line_height) + text_size[1]
-
-        cv2.putText(img, line, (text_x, text_y), font, font_scale, (0, 0, 0), thickness + 4, cv2.LINE_AA)
-        cv2.putText(img, line, (text_x, text_y), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
+        tx, ty = (w - text_size[0]) // 2, start_y + (i * line_height) + text_size[1]
+        cv2.putText(img, line, (tx, ty), font, font_scale, (0, 0, 0), thickness + 4, cv2.LINE_AA)
+        cv2.putText(img, line, (tx, ty), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
 
 
-def create_subtitled_video(input_video: str, timed_segments: list, output_video: str):
-    """Manually renders subtitles and merges audio."""
+def create_subtitled_video(input_video: str, segments: list, output_video: str):
     cap = cv2.VideoCapture(input_video)
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps, w, h = cap.get(cv2.CAP_PROP_FPS), int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(
+        cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    temp_silent = str(LOCAL_TMP_DIR / "silent_tmp.mp4")
+    out = cv2.VideoWriter(temp_silent, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
 
-    temp_silent = str(LOCAL_TMP_DIR / f"silent_{os.path.basename(input_video)}")
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(temp_silent, fourcc, fps, (width, height))
-
-    frame_count = 0
+    fc = 0
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret: break
-
-        current_time = frame_count / fps
-        active_text = next((s['text'] for s in timed_segments if s['start'] <= current_time <= s['end']), None)
-
-        if active_text:
-            draw_text_with_outline(frame, active_text)
-
+        t = fc / fps
+        txt = next((s['text'] for s in segments if s['start'] <= t <= s['end']), None)
+        if txt: draw_text_with_outline(frame, txt)
         out.write(frame)
-        frame_count += 1
-
-    cap.release()
+        fc += 1
+    cap.release();
     out.release()
 
     try:
-        orig_clip = VideoFileClip(input_video)
-        rendered_clip = VideoFileClip(temp_silent)
+        with VideoFileClip(input_video) as orig_clip:
+            with VideoFileClip(temp_silent) as rendered_clip:
+                # Handle MoviePy v1 vs v2 compatibility
+                if hasattr(rendered_clip, 'with_audio'):
+                    final = rendered_clip.with_audio(orig_clip.audio)
+                elif hasattr(rendered_clip, 'set_audio'):
+                    final = rendered_clip.set_audio(orig_clip.audio)
+                else:
+                    # Fallback for some specific environment configurations
+                    final = rendered_clip
+                    final.audio = orig_clip.audio
 
-        if hasattr(rendered_clip, 'with_audio'):
-            final_clip = rendered_clip.with_audio(orig_clip.audio)
-        else:
-            final_clip = rendered_clip.set_audio(orig_clip.audio)
-
-        final_clip.write_videofile(output_video, codec="libx264", audio_codec="aac", logger=None)
-
-        orig_clip.close()
-        rendered_clip.close()
-        if os.path.exists(temp_silent):
-            os.remove(temp_silent)
+                final.write_videofile(output_video, codec="libx264", audio_codec="aac", logger=None)
         return True
     except Exception as e:
-        logger.error(f"Media merge failed: {e}")
+        logger.error(f"Merge error: {e}")
         return False
+    finally:
+        if os.path.exists(temp_silent): os.remove(temp_silent)
 
 
-# -----------------------------------------------------------------------------
-# TRANSCRIPTION & TRANSLATION LOGIC
-# -----------------------------------------------------------------------------
-def transcribe_and_translate(video_path: str):
-    segments, info = whisper_model.transcribe(video_path, beam_size=5)
+async def transcribe_and_translate(video_path: str, update_func):
+    loop = asyncio.get_running_loop()
+    if USE_CLOUD_WHISPER:
+        await update_func("☁️ Extracting audio...")
+        audio_path = str(LOCAL_TMP_DIR / "audio.m4a")
 
-    segments_list = list(segments)
-    # Joining with a delimiter so GPT can translate while keeping segments distinct
-    full_transcript_str = " || ".join([s.text.strip() for s in segments_list])
+        def ext():
+            with VideoFileClip(video_path) as v:
+                v.audio.write_audiofile(audio_path, codec='aac', logger=None)
 
-    source_name = LANGUAGE_DATA.get(info.language, ('🌍', info.language.upper()))[1]
+        await loop.run_in_executor(None, ext)
 
-    # Improved GPT Translation Prompt to maintain segments
-    response = openai_client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system",
-             "content": f"Translate to natural English subtitles. Maintain the ' || ' delimiters to keep segment timing. Source: {source_name}. Output ONLY translation."},
-            {"role": "user", "content": full_transcript_str}
-        ],
-        temperature=0.3
-    )
-    translation_blob = response.choices[0].message.content
-    translated_parts = [p.strip() for p in translation_blob.split("||")]
+        res = await loop.run_in_executor(None, lambda: openai_client.audio.transcriptions.create(
+            model="whisper-1", file=open(audio_path, "rb"), response_format="verbose_json",
+            timestamp_granularities=["segment"]
+        ))
+        raw_segs, lang = res.segments, res.language
+    else:
+        await update_func("⚙️ Local transcription...")
+        segs_gen, info = whisper_model.transcribe(video_path)
+        raw_segs, lang = list(segs_gen), info.language
 
-    timed_segments = []
-    for i, s in enumerate(segments_list):
-        # Fallback to original text if GPT messed up the segment count
-        text = translated_parts[i] if i < len(translated_parts) else s.text
-        timed_segments.append({'start': s.start, 'end': s.end, 'text': text})
+    if not raw_segs: return None
 
-    full_orig = " ".join([s.text for s in segments_list])
-    full_trans = " ".join(translated_parts)
+    full_text = " || ".join([s.text.strip() if hasattr(s, 'text') else s['text'].strip() for s in raw_segs])
+    await update_func(f"✨ Translating from {lang.upper()} using {TRANSLATION_MODEL}...")
 
-    return full_orig, full_trans, timed_segments, info.language, info.language_probability
+    gpt = await loop.run_in_executor(None, lambda: openai_client.chat.completions.create(
+        model=TRANSLATION_MODEL, messages=[
+            {"role": "system", "content": "Translate to English. Keep ' || ' separators. Output ONLY translated text."},
+            {"role": "user", "content": full_text}
+        ]
+    ))
 
+    trans_parts = [p.strip() for p in gpt.choices[0].message.content.split("||")]
+    timed = []
+    for i, s in enumerate(raw_segs):
+        st = s.start if hasattr(s, 'start') else s['start']
+        en = s.end if hasattr(s, 'end') else s['end']
+        txt = trans_parts[i] if i < len(trans_parts) else (s.text if hasattr(s, 'text') else s['text'])
+        timed.append({'start': st, 'end': en, 'text': txt})
 
-# -----------------------------------------------------------------------------
-# TELEGRAM HANDLERS
-# -----------------------------------------------------------------------------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Send me a video for high-quality English subtitles!")
+    return " ".join([s.text if hasattr(s, 'text') else s['text'] for s in raw_segs]), " ".join(trans_parts), timed, lang
 
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global FILES_FROM_PREVIOUS_RUN
-
-    if FILES_FROM_PREVIOUS_RUN:
-        for old_path in FILES_FROM_PREVIOUS_RUN:
-            try:
-                if os.path.exists(old_path): os.remove(old_path)
-            except:
-                pass
-        FILES_FROM_PREVIOUS_RUN = []
-
-    status_msg = await update.message.reply_text("📥 Processing...")
+    msg = await update.message.reply_text("📥 Downloading...")
     media = update.message.video or update.message.video_note
-    if not media: return
-
-    file_id = media.file_id
-    unique_id = f"proc_{file_id[:10]}"
-    temp_in = str(LOCAL_TMP_DIR / f"{unique_id}_in.mp4")
-    temp_out = str(LOCAL_TMP_DIR / f"{unique_id}_out.mp4")
-    temp_srt = str(LOCAL_TMP_DIR / f"{unique_id}.srt")
+    fid = media.file_id
+    t_in, t_out = str(LOCAL_TMP_DIR / f"i_{fid[:8]}.mp4"), str(LOCAL_TMP_DIR / f"o_{fid[:8]}.mp4")
 
     try:
-        new_file = await context.bot.get_file(file_id)
-        await new_file.download_to_drive(custom_path=temp_in)
+        f = await context.bot.get_file(fid)
+        await f.download_to_drive(custom_path=t_in)
 
-        await status_msg.edit_text("⚙️ Transcribing & Translating...")
-        loop = asyncio.get_running_loop()
-        orig, trans, segments, l_code, prob = await loop.run_in_executor(None, transcribe_and_translate, temp_in)
+        async def up(t):
+            try:
+                await msg.edit_text(t)
+            except:
+                pass
 
-        # Save SRT with proper timings
-        with open(temp_srt, "w", encoding="utf-8") as f:
-            for i, seg in enumerate(segments):
-                f.write(
-                    f"{i + 1}\n{format_timestamp(seg['start'])} --> {format_timestamp(seg['end'])}\n{seg['text']}\n\n")
+        result = await transcribe_and_translate(t_in, up)
+        if not result:
+            await msg.edit_text("⚠️ No speech found.");
+            return
 
-        await status_msg.edit_text("🎬 Rendering video with synced subtitles...")
-        # CRITICAL FIX: Pass the 'segments' list (with individual start/end) instead of a single giant block
-        success = await loop.run_in_executor(None, create_subtitled_video, temp_in, segments, temp_out)
+        orig, trans, segments, l_code = result
+        await up("🎬 Rendering subtitles...")
+        success = await asyncio.get_running_loop().run_in_executor(None, create_subtitled_video, t_in, segments, t_out)
 
-        caption = f"🇺🇸 **Translation:**\n{trans}"
         if success:
-            await status_msg.edit_text("✅ Done! Uploading...")
-            await update.message.reply_video(video=open(temp_out, 'rb'), caption=caption[:1024], parse_mode="Markdown")
+            flag, name = LANGUAGE_DATA.get(l_code, ('🌍', l_code.upper()))
+            cap = f"{flag} **Original:**\n{orig}\n\n🇺🇸 **English:**\n{trans}"
+            await msg.delete()
+            # Telegram caption limit is 1024 chars, so we slice at the end only to prevent API errors
+            await update.message.reply_video(video=open(t_out, 'rb'), caption=cap[:1024], parse_mode="Markdown")
         else:
-            await status_msg.edit_text("⚠️ Render failed. Sending text.")
-            await update.message.reply_text(caption)
-
+            await msg.edit_text("⚠️ Render failed.")
     except Exception as e:
-        logger.error(f"Error: {e}")
-        await status_msg.edit_text(f"❌ Error: {str(e)}")
-
-    FILES_FROM_PREVIOUS_RUN.extend([temp_in, temp_out, temp_srt])
+        await msg.edit_text(f"❌ Error: {str(e)}")
+    finally:
+        for p in [t_in, t_out]:
+            if os.path.exists(p): os.remove(p)
 
 
 if __name__ == '__main__':
+    cleanup_temp_folder()
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("Send a video!")))
     app.add_handler(MessageHandler(filters.VIDEO | filters.VIDEO_NOTE, handle_video))
     app.run_polling()
