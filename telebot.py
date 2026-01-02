@@ -246,8 +246,22 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     logger.info("-" * 20)
     logger.info(f"Processing video from User ID: {user_id}")
-    msg = await update.message.reply_text("📥 Downloading...")
+
     media = update.message.video or update.message.video_note
+
+    # Pre-download size check (Bot API limit is 20MB)
+    if media.file_size and media.file_size > 20 * 1024 * 1024:
+        size_mb = media.file_size / (1024 * 1024)
+        logger.error(f">>> STAGE: ERROR: File is too big ({size_mb:.1f} MB)")
+        await update.message.reply_text(
+            f"⚠️ **File is too large ({size_mb:.1f}MB).**\n\n"
+            "Telegram limits bots to a **20MB maximum** download. "
+            "Please try trimming the video or sending a lower-resolution version so the file size is under 20MB.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    msg = await update.message.reply_text("📥 Receiving video...")
     fid = media.file_id
     t_in, t_out = str(LOCAL_TMP_DIR / f"i_{fid[:8]}.mp4"), str(LOCAL_TMP_DIR / f"o_{fid[:8]}.mp4")
     loop = asyncio.get_running_loop()
@@ -290,7 +304,13 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             mode_tag = " [DEBUG]" if IS_LOCAL else ""
             cap = f"{flag} **{name}:**\n{orig}\n\n🇺🇸 **English:**\n{trans}{mode_tag}"
 
-            await update.message.reply_video(video=open(t_out, 'rb'), caption=cap[:1024], parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_video(
+                video=open(t_out, 'rb'),
+                caption=cap[:1024],
+                parse_mode=ParseMode.MARKDOWN,
+                read_timeout=600,
+                write_timeout=600
+            )
             await msg.delete()
             logger.info(">>> STAGE: COMPLETE - SUCCESS")
         else:
@@ -298,7 +318,11 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f">>> STAGE: ERROR: {e}")
         try:
-            await msg.edit_text(f"❌ Error: {str(e)}")
+            error_msg = str(e)
+            if "File is too big" in error_msg:
+                await msg.edit_text("⚠️ Telegram limit: This video is too large for the bot to process (>20MB).")
+            else:
+                await msg.edit_text(f"❌ Error: {error_msg}")
         except:
             pass
     finally:
@@ -310,8 +334,12 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 if __name__ == '__main__':
     if not TELEGRAM_BOT_TOKEN: sys.exit(1)
     cleanup_temp_folder()
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("Send a video!")))
+
+    # Higher timeout for larger file handling
+    request = HTTPXRequest(connect_timeout=60.0, read_timeout=600.0, write_timeout=600.0)
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).request(request).build()
+
+    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("Send a video! (Max 20MB)")))
     app.add_handler(MessageHandler(filters.VIDEO | filters.VIDEO_NOTE, handle_video))
-    logger.info("🚀 Bot started with Rotating Log Handlers.")
+    logger.info("🚀 Bot started with Rotating Log Handlers and increased timeouts.")
     app.run_polling()
