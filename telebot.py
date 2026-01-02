@@ -7,6 +7,7 @@ import cv2
 import shutil
 import socket
 from pathlib import Path
+from logging.handlers import RotatingFileHandler
 
 # Fix for library conflicts
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -39,10 +40,35 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 # Environment Detection - Strictly based on IS_LOCAL env var
 IS_LOCAL = os.getenv("IS_LOCAL", "false").lower() == "true"
 
+BASE_DIR = Path(__file__).parent.absolute()
+LOCAL_TMP_DIR = BASE_DIR / "tmp"
+LOCAL_TMP_DIR.mkdir(parents=True, exist_ok=True)
+
+# -----------------------------------------------------------------------------
+# LOGGING SETUP (Prevents disk space exhaustion)
+# -----------------------------------------------------------------------------
+log_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+log_file = BASE_DIR / "bot_log.log"
+
+# Rotate at 5MB, keep 3 old log files
+file_handler = RotatingFileHandler(log_file, maxBytes=5 * 1024 * 1024, backupCount=3)
+file_handler.setFormatter(log_formatter)
+file_handler.setLevel(logging.INFO)
+
+stream_handler = logging.StreamHandler()
+stream_handler.setFormatter(log_formatter)
+stream_handler.setLevel(logging.INFO)
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+logger.addHandler(file_handler)
+logger.addHandler(stream_handler)
+
 print("\n" + "=" * 40)
 print("       ENVIRONMENT DETECTION")
 print("=" * 40)
 print(f" IS_LOCAL:     {IS_LOCAL}")
+print(f" LOG FILE:     {log_file}")
 print("=" * 40 + "\n")
 
 if IS_LOCAL:
@@ -60,10 +86,6 @@ else:
     USE_LOCAL_WHISPER = False
     print("🚀 PROD MODE: Cloud Whisper + GPT-4o-Mini")
 
-BASE_DIR = Path(__file__).parent.absolute()
-LOCAL_TMP_DIR = BASE_DIR / "tmp"
-LOCAL_TMP_DIR.mkdir(parents=True, exist_ok=True)
-
 LANGUAGE_DATA = {
     'ar': ('🇸🇦', 'Arabic'), 'he': ('🇮🇱', 'Hebrew'), 'ru': ('🇷🇺', 'Russian'),
     'es': ('🇪🇸', 'Spanish'), 'fr': ('🇫🇷', 'French'), 'de': ('🇩🇪', 'German'),
@@ -73,9 +95,6 @@ LANGUAGE_DATA = {
     'hi': ('🇮🇳', 'Hindi'), 'fa': ('🇮🇷', 'Persian'), 'en': ('🇺🇸', 'English'),
     'vi': ('🇻🇳', 'Vietnamese'), 'th': ('🇹🇭', 'Thai')
 }
-
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -149,7 +168,7 @@ def create_subtitled_video(input_video: str, segments: list, output_video: str, 
     if progress_callback: progress_callback("✅ Finished rendering frames.")
 
     logger.info(">>> STAGE: Audio Merging Started")
-    if progress_callback: progress_callback("🎵 Merging with original sound...")
+    if progress_callback: progress_callback("🎵 Merging with original sound... [could take a while]")
 
     try:
         with VideoFileClip(input_video) as orig_clip:
@@ -285,5 +304,5 @@ if __name__ == '__main__':
 
     app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("Send a video!")))
     app.add_handler(MessageHandler(filters.VIDEO | filters.VIDEO_NOTE, handle_video))
-    logger.info("🚀 Bot started with explicit stage logging.")
+    logger.info("🚀 Bot started with Rotating Log Handlers.")
     app.run_polling()
