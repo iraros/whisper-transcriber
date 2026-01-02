@@ -34,17 +34,12 @@ except ImportError as e:
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# Check if running on GCP VM (usually has 'google' in hostname or specific metadata)
 # You can also manually set IS_LOCAL="true" in your local environment variables
-hostname = socket.gethostname()
-is_local_env = os.getenv("IS_LOCAL", "false").lower() == "true"
-IS_LOCAL = is_local_env or "google" not in hostname
+IS_LOCAL = os.getenv("IS_LOCAL", "false").lower() == "true"
 
 # Explicit Logging for Environment Debugging
 print("-" * 30)
 print(f"DEBUG: IS_LOCAL status: {IS_LOCAL}")
-print(f"DEBUG: Hostname detected: {hostname}")
-print(f"DEBUG: IS_LOCAL Env Var: {is_local_env}")
 print("-" * 30)
 
 if IS_LOCAL:
