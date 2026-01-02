@@ -161,7 +161,7 @@ def create_subtitled_video(input_video: str, segments: list, output_video: str, 
             logger.info(f"Rendering Progress: {pct}%")
             if progress_callback: progress_callback(f"🎬 Rendering... {pct}%")
         fc += 1
-    cap.release();
+    cap.release()
     out.release()
 
     logger.info(">>> STAGE: Visual Rendering Finished")
@@ -181,23 +181,23 @@ def create_subtitled_video(input_video: str, segments: list, output_video: str, 
         logger.info(">>> STAGE: Audio Merging Finished")
         return True
     except Exception as e:
-        logger.error(f"Merge error: {e}");
+        logger.error(f"Merge error: {e}")
         return False
     finally:
         if os.path.exists(temp_silent): os.remove(temp_silent)
 
 
-async def transcribe_and_translate(video_path: str, update_func):
+async def transcribe_and_translate(video_path: str, duration: float, update_func):
     loop = asyncio.get_running_loop()
     if USE_LOCAL_WHISPER:
         logger.info(">>> STAGE: Local Transcription Started")
-        await update_func("⚙️ Local Whisper...")
+        await update_func(f"⚙️ Local Whisper (Video: {duration:.1f}s)...")
         segs_gen, info = await loop.run_in_executor(None, lambda: whisper_model.transcribe(video_path))
         raw_segs, lang_raw = list(segs_gen), info.language
         logger.info(f">>> STAGE: Transcription Finished (Lang: {lang_raw})")
     else:
         logger.info(">>> STAGE: Cloud Transcription Started")
-        await update_func("☁️ Cloud Extraction...")
+        await update_func(f"☁️ Cloud Transcription (Whisper-1 | {duration:.1f}s)...")
         audio_path = str(LOCAL_TMP_DIR / "audio.m4a")
 
         def ext():
@@ -215,7 +215,7 @@ async def transcribe_and_translate(video_path: str, update_func):
 
     logger.info(">>> STAGE: GPT Translation Started")
     full_text = " || ".join([s.text.strip() if hasattr(s, 'text') else s['text'].strip() for s in raw_segs])
-    await update_func(f"✨ Translating...")
+    await update_func(f"✨ Translating ({TRANSLATION_MODEL})...")
     gpt = await loop.run_in_executor(None, lambda: openai_client.chat.completions.create(
         model=TRANSLATION_MODEL, messages=[
             {"role": "system", "content": "Translate to English. Keep ' || ' separators."},
@@ -248,10 +248,17 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f = await context.bot.get_file(fid)
         await f.download_to_drive(custom_path=t_in)
 
+        # Get video duration for feedback
+        cap_info = cv2.VideoCapture(t_in)
+        fps = cap_info.get(cv2.CAP_PROP_FPS) or 30.0
+        frame_count = cap_info.get(cv2.CAP_PROP_FRAME_COUNT)
+        duration = frame_count / fps
+        cap_info.release()
+
         def thread_safe_update(text):
             asyncio.run_coroutine_threadsafe(msg.edit_text(text), loop)
 
-        result = await transcribe_and_translate(t_in, lambda t: msg.edit_text(t))
+        result = await transcribe_and_translate(t_in, duration, lambda t: msg.edit_text(t))
         if not result:
             await msg.edit_text("⚠️ No speech found.")
             logger.info(">>> STAGE: ABORTED (No speech)")
@@ -267,9 +274,11 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text("📤 Sending finished video...")
 
             l_code = lang_raw.lower()[:2]
-            flag = LANGUAGE_DATA.get(l_code, ('🌍', ''))[0]
+            flag, name = LANGUAGE_DATA.get(l_code, ('🌍', l_code.upper()))
             mode_tag = " [DEBUG]" if IS_LOCAL else ""
-            cap = f"{flag} **Original:**\n{orig}\n\n🇺🇸 **English:**\n{trans}{mode_tag}"
+
+            # Formatted caption with Language Name and Flag
+            cap = f"{flag} **{name}:**\n{orig}\n\n🇺🇸 **English:**\n{trans}{mode_tag}"
 
             await update.message.reply_video(
                 video=open(t_out, 'rb'),
@@ -296,7 +305,9 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 if __name__ == '__main__':
-    if not TELEGRAM_BOT_TOKEN: sys.exit(1)
+    if not TELEGRAM_BOT_TOKEN:
+        print("Error: TELEGRAM_BOT_TOKEN not set.")
+        sys.exit(1)
     cleanup_temp_folder()
 
     request = HTTPXRequest(connect_timeout=60.0, read_timeout=600.0, write_timeout=600.0)
@@ -304,5 +315,5 @@ if __name__ == '__main__':
 
     app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("Send a video!")))
     app.add_handler(MessageHandler(filters.VIDEO | filters.VIDEO_NOTE, handle_video))
-    logger.info("🚀 Bot started with Rotating Log Handlers.")
+    logger.info("🚀 Bot started with Rotating Log Handlers and explicit stage logging.")
     app.run_polling()
