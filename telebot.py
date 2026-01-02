@@ -45,19 +45,17 @@ LOCAL_TMP_DIR = BASE_DIR / "tmp"
 LOCAL_TMP_DIR.mkdir(parents=True, exist_ok=True)
 
 # -----------------------------------------------------------------------------
-# LOGGING SETUP (Prevents disk space exhaustion)
+# LOGGING SETUP
 # -----------------------------------------------------------------------------
 log_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 log_file = BASE_DIR / "bot_log.log"
 
-# Rotate at 5MB, keep 3 old log files
-file_handler = RotatingFileHandler(log_file, maxBytes=5 * 1024 * 1024, backupCount=3)
+# Added encoding='utf-8' to prevent UnicodeEncodeError on Windows
+file_handler = RotatingFileHandler(log_file, maxBytes=5 * 1024 * 1024, backupCount=3, encoding='utf-8')
 file_handler.setFormatter(log_formatter)
-file_handler.setLevel(logging.INFO)
 
 stream_handler = logging.StreamHandler()
 stream_handler.setFormatter(log_formatter)
-stream_handler.setLevel(logging.INFO)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -86,22 +84,21 @@ else:
     USE_LOCAL_WHISPER = False
     print("🚀 PROD MODE: Cloud Whisper + GPT-4o-Mini")
 
+# Comprehensive Language Map for Flags & Full Names
 LANGUAGE_DATA = {
     'ar': ('🇸🇦', 'Arabic'), 'he': ('🇮🇱', 'Hebrew'), 'ru': ('🇷🇺', 'Russian'),
     'es': ('🇪🇸', 'Spanish'), 'fr': ('🇫🇷', 'French'), 'de': ('🇩🇪', 'German'),
-    'it': ('🇮🇹', 'Italian'), 'pt': ('🇵🇹', 'Portuguese'), 'ja': ('🇯🇵', 'Japanese'),
+    'it': ('🇮🇱', 'Italian'), 'pt': ('🇵🇹', 'Portuguese'), 'ja': ('🇯🇵', 'Japanese'),
     'ko': ('🇰🇷', 'Korean'), 'zh': ('🇨🇳', 'Chinese'), 'tr': ('🇹🇷', 'Turkish'),
     'nl': ('🇳🇱', 'Dutch'), 'pl': ('🇵🇱', 'Polish'), 'uk': ('🇺🇦', 'Ukrainian'),
     'hi': ('🇮🇳', 'Hindi'), 'fa': ('🇮🇷', 'Persian'), 'en': ('🇺🇸', 'English'),
-    'vi': ('🇻🇳', 'Vietnamese'), 'th': ('🇹🇭', 'Thai')
+    'vi': ('🇻🇳', 'Vietnamese'), 'th': ('🇹🇭', 'Thai'), 'id': ('🇮🇩', 'Indonesian'),
+    'el': ('🇬🇷', 'Greek'), 'cs': ('🇨🇿', 'Czech'), 'hu': ('🇭🇺', 'Hungarian')
 }
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 
-# -----------------------------------------------------------------------------
-# HELPERS
-# -----------------------------------------------------------------------------
 def cleanup_temp_folder():
     for file_path in LOCAL_TMP_DIR.glob('*'):
         try:
@@ -168,7 +165,7 @@ def create_subtitled_video(input_video: str, segments: list, output_video: str, 
     if progress_callback: progress_callback("✅ Finished rendering frames.")
 
     logger.info(">>> STAGE: Audio Merging Started")
-    if progress_callback: progress_callback("🎵 Merging with original sound... [could take a while]")
+    if progress_callback: progress_callback("🎵 Merging with original sound...")
 
     try:
         with VideoFileClip(input_video) as orig_clip:
@@ -191,13 +188,18 @@ async def transcribe_and_translate(video_path: str, duration: float, update_func
     loop = asyncio.get_running_loop()
     if USE_LOCAL_WHISPER:
         logger.info(">>> STAGE: Local Transcription Started")
-        await update_func(f"⚙️ Local Whisper (Video: {duration:.1f}s)...")
+        await update_func(f"⚙️ Local Transcription... (Video: {duration:.1f}s)")
         segs_gen, info = await loop.run_in_executor(None, lambda: whisper_model.transcribe(video_path))
         raw_segs, lang_raw = list(segs_gen), info.language
         logger.info(f">>> STAGE: Transcription Finished (Lang: {lang_raw})")
     else:
+        # Calculate cost estimation (OpenAI Whisper: $0.006/min)
+        # $0.006 * ~3.7 ILS/USD = 0.0222 ILS/min = 2.22 Agorot/min
+        cost_agorot = (duration / 60.0) * 0.006 * 370.0  # 100 * 3.7
+        cost_str = f" (~{cost_agorot:.2f} Agorot)"
+
         logger.info(">>> STAGE: Cloud Transcription Started")
-        await update_func(f"☁️ Cloud Transcription (Whisper-1 | {duration:.1f}s)...")
+        await update_func(f"☁️ Cloud Transcription (Whisper-1 | {duration:.1f}s){cost_str}...")
         audio_path = str(LOCAL_TMP_DIR / "audio.m4a")
 
         def ext():
@@ -236,8 +238,10 @@ async def transcribe_and_translate(video_path: str, duration: float, update_func
 
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
     logger.info("-" * 20)
-    logger.info(f"Incoming video from User ID: {update.effective_user.id}")
+    logger.info(f"Processing video from User ID: {user_id}")
     msg = await update.message.reply_text("📥 Downloading...")
     media = update.message.video or update.message.video_note
     fid = media.file_id
@@ -248,11 +252,9 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f = await context.bot.get_file(fid)
         await f.download_to_drive(custom_path=t_in)
 
-        # Get video duration for feedback
         cap_info = cv2.VideoCapture(t_in)
         fps = cap_info.get(cv2.CAP_PROP_FPS) or 30.0
-        frame_count = cap_info.get(cv2.CAP_PROP_FRAME_COUNT)
-        duration = frame_count / fps
+        duration = cap_info.get(cv2.CAP_PROP_FRAME_COUNT) / fps
         cap_info.release()
 
         def thread_safe_update(text):
@@ -261,37 +263,34 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = await transcribe_and_translate(t_in, duration, lambda t: msg.edit_text(t))
         if not result:
             await msg.edit_text("⚠️ No speech found.")
-            logger.info(">>> STAGE: ABORTED (No speech)")
             return
 
         orig, trans, segments, lang_raw = result
         await msg.edit_text("🎬 Rendering... 0%")
-
         success = await loop.run_in_executor(None, create_subtitled_video, t_in, segments, t_out, thread_safe_update)
 
         if success:
-            logger.info(">>> STAGE: Sending Video to Telegram")
-            await msg.edit_text("📤 Sending finished video...")
+            logger.info(f">>> STAGE: Sending Finished Video (Detected: {lang_raw})")
 
-            l_code = lang_raw.lower()[:2]
-            flag, name = LANGUAGE_DATA.get(l_code, ('🌍', l_code.upper()))
+            clean_lang = lang_raw.lower()
+            l_code = clean_lang[:2]
+
+            flag, name = LANGUAGE_DATA.get(l_code, (None, None))
+            if not flag:
+                match = next(((f, n) for code, (f, n) in LANGUAGE_DATA.items() if n.lower() == clean_lang), None)
+                if match:
+                    flag, name = match
+                else:
+                    flag, name = ('🌍', clean_lang.upper())
+
             mode_tag = " [DEBUG]" if IS_LOCAL else ""
-
-            # Formatted caption with Language Name and Flag
             cap = f"{flag} **{name}:**\n{orig}\n\n🇺🇸 **English:**\n{trans}{mode_tag}"
 
-            await update.message.reply_video(
-                video=open(t_out, 'rb'),
-                caption=cap[:1024],
-                parse_mode=ParseMode.MARKDOWN,
-                read_timeout=600,
-                write_timeout=600
-            )
+            await update.message.reply_video(video=open(t_out, 'rb'), caption=cap[:1024], parse_mode=ParseMode.MARKDOWN)
             await msg.delete()
             logger.info(">>> STAGE: COMPLETE - SUCCESS")
         else:
             await msg.edit_text("⚠️ Render failed.")
-            logger.error(">>> STAGE: COMPLETE - FAILED AT RENDER")
     except Exception as e:
         logger.error(f">>> STAGE: ERROR: {e}")
         try:
@@ -305,15 +304,10 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 if __name__ == '__main__':
-    if not TELEGRAM_BOT_TOKEN:
-        print("Error: TELEGRAM_BOT_TOKEN not set.")
-        sys.exit(1)
+    if not TELEGRAM_BOT_TOKEN: sys.exit(1)
     cleanup_temp_folder()
-
-    request = HTTPXRequest(connect_timeout=60.0, read_timeout=600.0, write_timeout=600.0)
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).request(request).build()
-
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("Send a video!")))
     app.add_handler(MessageHandler(filters.VIDEO | filters.VIDEO_NOTE, handle_video))
-    logger.info("🚀 Bot started with Rotating Log Handlers and explicit stage logging.")
+    logger.info("🚀 Bot started with Rotating Log Handlers.")
     app.run_polling()
