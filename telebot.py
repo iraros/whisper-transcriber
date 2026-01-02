@@ -215,9 +215,13 @@ async def transcribe_and_translate(video_path: str, duration: float, update_func
 
     if not raw_segs: return None
 
+    # Get language details for progress message
+    l_code = lang_raw.lower()[:2]
+    flag, name = LANGUAGE_DATA.get(l_code, ('🌍', lang_raw.upper()))
+
     logger.info(">>> STAGE: GPT Translation Started")
     full_text = " || ".join([s.text.strip() if hasattr(s, 'text') else s['text'].strip() for s in raw_segs])
-    await update_func(f"✨ Translating ({TRANSLATION_MODEL})...")
+    await update_func(f"✨ Translating from {flag} {name} ({TRANSLATION_MODEL})...")
     gpt = await loop.run_in_executor(None, lambda: openai_client.chat.completions.create(
         model=TRANSLATION_MODEL, messages=[
             {"role": "system", "content": "Translate to English. Keep ' || ' separators."},
