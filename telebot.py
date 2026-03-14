@@ -49,6 +49,9 @@ WHISPER_USD_PER_MIN = 0.006
 USD_TO_ILS = 3.7
 AGOROT_PER_ILS = 100
 
+# Translation chunking — max segments per GPT call (prevents token limit failures on long videos)
+TRANSLATION_CHUNK_SIZE = 25
+
 # -----------------------------------------------------------------------------
 # LOGGING SETUP
 # -----------------------------------------------------------------------------
@@ -81,7 +84,7 @@ if IS_LOCAL:
         from faster_whisper import WhisperModel
 
         whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
-        print(f"🛠 DEBUG MODE: {WHISPER_LABEL} + {TRANSLATION_MODEL}")
+        print(f"[DEBUG] DEBUG MODE: {WHISPER_LABEL} + {TRANSLATION_MODEL}")
     except ImportError:
         USE_LOCAL_WHISPER = False
 else:
@@ -103,6 +106,58 @@ LANGUAGE_DATA = {
 }
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
+
+
+def format_text_for_telegram(parts: list[str]) -> str:
+    """Group translated segments into readable paragraphs for Telegram display."""
+    sentence_endings = ('.', '!', '?', '...', '؟', '。', '！', '？')
+    paragraphs = []
+    group = []
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        group.append(part)
+        if part.endswith(sentence_endings) or len(group) >= 4:
+            paragraphs.append(' '.join(group))
+            group = []
+    if group:
+        paragraphs.append(' '.join(group))
+    return '\n\n'.join(paragraphs)
+
+
+def split_long_segments(segments: list, max_sentences: int = 2) -> list:
+    """Split subtitle segments that contain more than max_sentences into smaller ones.
+    Time is distributed proportionally by character count."""
+    import re
+    result = []
+    for seg in segments:
+        text = seg['text'].strip()
+        # Split on sentence-ending punctuation followed by whitespace or end of string
+        sentences = re.split(r'(?<=[.!?؟。！？])\s+', text)
+        sentences = [s.strip() for s in sentences if s.strip()]
+
+        if len(sentences) <= max_sentences:
+            result.append(seg)
+            continue
+
+        duration = seg['end'] - seg['start']
+        total_chars = sum(len(s) for s in sentences) or 1
+        current_time = seg['start']
+
+        for i in range(0, len(sentences), max_sentences):
+            group = sentences[i:i + max_sentences]
+            group_text = ' '.join(group)
+            group_chars = sum(len(s) for s in group)
+            group_duration = duration * (group_chars / total_chars)
+            result.append({
+                'start': current_time,
+                'end': current_time + group_duration,
+                'text': group_text
+            })
+            current_time += group_duration
+
+    return result
 
 
 def cleanup_temp_folder():
@@ -240,16 +295,33 @@ async def transcribe_and_translate(video_path: str, duration: float, update_func
     flag, name = LANGUAGE_DATA.get(l_code, ('🌍', lang_raw.upper()))
 
     logger.info(f">>> STAGE: Translation Started ({TRANSLATION_MODEL})")
-    full_text = " || ".join([s.text.strip() if hasattr(s, 'text') else s['text'].strip() for s in raw_segs])
-    await update_func(f"{status_header}✨ Translating from {flag} {name} via {TRANSLATION_MODEL}...")
+    total_chunks = (len(raw_segs) + TRANSLATION_CHUNK_SIZE - 1) // TRANSLATION_CHUNK_SIZE
+    trans_parts = []
 
-    gpt = await loop.run_in_executor(None, lambda: openai_client.chat.completions.create(
-        model=TRANSLATION_MODEL, messages=[
-            {"role": "system", "content": "Translate to English. Keep ' || ' separators."},
-            {"role": "user", "content": full_text}
-        ]
-    ))
-    trans_parts = [p.strip() for p in gpt.choices[0].message.content.split("||")]
+    for chunk_idx in range(0, len(raw_segs), TRANSLATION_CHUNK_SIZE):
+        chunk = raw_segs[chunk_idx:chunk_idx + TRANSLATION_CHUNK_SIZE]
+        chunk_num = chunk_idx // TRANSLATION_CHUNK_SIZE + 1
+        await update_func(
+            f"{status_header}✨ Translating {flag} {name} → EN ({chunk_num}/{total_chunks})..."
+        )
+        chunk_text = " || ".join(
+            [s.text.strip() if hasattr(s, 'text') else s['text'].strip() for s in chunk]
+        )
+        gpt = await loop.run_in_executor(None, lambda ct=chunk_text: openai_client.chat.completions.create(
+            model=TRANSLATION_MODEL, messages=[
+                {"role": "system", "content": (
+                    "Translate to English. Preserve ALL ' || ' separators exactly. "
+                    "Output the same number of segments as the input."
+                )},
+                {"role": "user", "content": ct}
+            ]
+        ))
+        parts = [p.strip() for p in gpt.choices[0].message.content.split("||")]
+        # Guard against GPT returning fewer parts than expected
+        while len(parts) < len(chunk):
+            parts.append(parts[-1] if parts else "")
+        trans_parts.extend(parts[:len(chunk)])
+
     logger.info(">>> STAGE: Translation Finished")
 
     timed = []
@@ -258,8 +330,11 @@ async def transcribe_and_translate(video_path: str, duration: float, update_func
         en = s.end if hasattr(s, 'end') else s['end']
         txt = trans_parts[i] if i < len(trans_parts) else (s.text if hasattr(s, 'text') else s['text'])
         timed.append({'start': st, 'end': en, 'text': txt})
-    return " ".join([s.text if hasattr(s, 'text') else s['text'] for s in raw_segs]), " ".join(
-        trans_parts), timed, lang_raw
+
+    orig_text = " ".join([s.text if hasattr(s, 'text') else s['text'] for s in raw_segs])
+    trans_formatted = format_text_for_telegram(trans_parts)
+    timed = split_long_segments(timed, max_sentences=2)
+    return orig_text, trans_formatted, timed, lang_raw
 
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -302,16 +377,26 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             l_code = lang_raw.lower()[:2]
             flag, name = LANGUAGE_DATA.get(l_code, ('🌍', lang_raw.upper()))
 
-            mode_tag = "\n [DEBUG]" if IS_LOCAL else ""
-            cap = f"{flag} **{name}:**\n{orig}\n\n🇺🇸 **English:**\n{trans}{mode_tag}"
+            mode_tag = "\n[DEBUG]" if IS_LOCAL else ""
+            full_text = f"{flag} *{name}:*\n\n{orig}\n\n🇺🇸 *English:*\n\n{trans}{mode_tag}"
 
+            # Send video with a short caption; text goes in a separate message to avoid truncation
+            short_cap = f"{flag} {name} → 🇺🇸 English (subtitled)"
             await update.message.reply_video(
                 video=open(t_out, 'rb'),
-                caption=cap[:1024],
-                parse_mode=ParseMode.MARKDOWN,
+                caption=short_cap,
                 read_timeout=600,
                 write_timeout=600
             )
+
+            # Send full formatted transcript — split into chunks if over Telegram's 4096-char limit
+            MAX_MSG_LEN = 4096
+            for i in range(0, len(full_text), MAX_MSG_LEN):
+                await update.message.reply_text(
+                    full_text[i:i + MAX_MSG_LEN],
+                    parse_mode=ParseMode.MARKDOWN
+                )
+
             await msg.delete()
             logger.info(">>> STAGE: COMPLETE - SUCCESS")
         else:
